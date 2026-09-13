@@ -51,10 +51,14 @@ imports    495 functions from 27 DLLs
 |---|---|
 | Target build | **v1.00.32**, the 2013 Japanese release — the smallest and the only unmodified one of the four |
 | PE parsing | **Works** on all four builds |
-| Functions recovered | see below — the binary is stripped, so these are recovered, not read |
-| Imports | **495**, of which **489** have a derived stack purge |
+| Functions recovered | **28,597** — the binary is stripped, so these are recovered by recursive descent, not read. 6 discovery rounds, 9,255,442 instructions, **99.5%** of the 4,308,348-byte code range |
+| Functions lifted | **28,596 / 28,596**, into 2,126,309 lines of C across 72 translation units. Not one failed outright |
+| Instruction coverage | **99.9737%** — 560 lines are `/* TODO */ abort()` |
+| Compiles | **Yes** — the largest translation unit builds to a clean 70 MB object with MSVC, no warnings |
+| Imports | **495**, of which **489** have a derived stack purge and **455** are answered by the host's own DLLs |
 | Board imports | **40** — the OKAO Vision camera, entirely by ordinal |
-| Runs | Not yet. The board needs bodies, and nothing is guessed. |
+| Boots | **As far as the entry point.** The image maps at `0x00400000`, all 495 IAT slots are patched, and control reaches `0x007CB996`. Not yet run against the full lifted image |
+| Plays | No. The board needs bodies, and nothing is guessed |
 
 ### The hard part is not the CPU
 
@@ -81,6 +85,23 @@ What is left is the cabinet:
 lets the game past the call and breaks it somewhere else an hour later; a
 handler that aborts naming itself is the to-do list in the order the game wants
 it. See [systemes3recomp's docs/board-io.md](https://github.com/sp00nznet/systemes3recomp/blob/main/docs/board-io.md).
+
+### What it cost the toolkit to get here
+
+This is the first game anyone has put through pcrecomp's whole PC pipeline, and
+every one of these was found by running it rather than by reading it. All fixed
+[upstream](https://github.com/sp00nznet/pcrecomp), where they help every
+PC-era target at once:
+
+| what | found how |
+|---|---|
+| Function extents were not clamped to the next function, so 28,597 functions claimed **89.5 MB of bodies out of 4.3 MB of code** and lifted to 1.9 GB of C | the output was too big to compile |
+| A body cut mid-function *returned* instead of transferring — skipping a `ret` that never ran and leaving esp four bytes low | reading the emitted C for a clamped function |
+| `fucompp` and `fucomp` were **81% of every instruction the lifter could not express**, because only the ordered `fcom` forms were listed | counting the `abort()` lines |
+| `repz ret`, `jmp fword ptr` and `fld tbyte` each ended the whole run with a traceback | the first three attempts at a full lift |
+| The host executable's own image base is `0x00400000` — exactly where the game wants to be | the first attempt to run it |
+| Moving the host is not enough: the loader fills that range before any user code can reserve it | the second attempt |
+| An import's identity is (DLL, name), not the name — eOkaoDt and eOkaoGn both import `ordinal_302` and they are different functions | the runtime reported 27 board imports where there are 40 |
 
 ### The camera is why the toolchain changed
 
@@ -116,10 +137,11 @@ cd mariokartdx-systemes3-recomp\systemes3recomp
 # what the game asks the board for
 py -3.11 -m tools pe path\to\MK_AGP3_FINAL.exe
 
-# recover its functions. Slow - hours on this binary - and you only do it once.
+# recover its functions. Half an hour on this binary, and you do it once -
+# every later step reads the catalog.
 py -3.11 -m tools scan path\to\MK_AGP3_FINAL.exe ..\catalog.json
 
-# lift it
+# lift it - minutes, and 199 MB of C comes out
 py -3.11 -m tools recomp path\to\MK_AGP3_FINAL.exe ..\catalog.json ^
                          ..\games\mariokartdx\generated
 
@@ -133,9 +155,23 @@ cmake --build build --config Release
 Run it from the game tree's own directory: the game opens `Data\` and
 `DataGlobal\` by relative path.
 
-It will then abort on the first thing it wants that the host cannot answer,
-naming it and the DLL it came from. That is the intended first run and the
-whole work plan.
+The first run looks like this, and is meant to:
+
+```
+[hle] 455 imports forwarded to the host's own DLLs, 40 not found
+      The ones left are the cabinet: JVS I/O, the card reader, the
+      camera, the authentication. See docs/board-io.md.
+[board] eOkaoAg.dll  unimplemented  <- OMRON OKAO Vision - age estimation
+[board] eOkaoCo.dll  unimplemented  <- OMRON OKAO Vision - common
+[board] eOkaoDt.dll  unimplemented  <- OMRON OKAO Vision - face detection
+[board] eOkaoGn.dll  unimplemented  <- OMRON OKAO Vision - gender estimation
+[board] eOkaoPt.dll  unimplemented  <- OMRON OKAO Vision - facial parts
+[host] entering MK_AGP3_FINAL.exe at 0x007cb996 (image at 0x00400000)
+```
+
+It then aborts on the first thing it wants that the host cannot answer, naming
+it and the DLL it came from. That is the whole work plan, in the order the game
+wants it.
 
 ## Layout
 
