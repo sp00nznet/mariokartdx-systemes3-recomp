@@ -54,11 +54,11 @@ imports    495 functions from 27 DLLs
 | Functions recovered | **28,597** — the binary is stripped, so these are recovered by recursive descent, not read. 6 discovery rounds, 9,255,442 instructions, **99.5%** of the 4,308,348-byte code range |
 | Functions lifted | **28,596 / 28,596**, into 2,126,309 lines of C across 72 translation units. Not one failed outright |
 | Instruction coverage | **99.9737%** — 560 lines are `/* TODO */ abort()` |
-| Compiles | **Yes** — the largest translation unit builds to a clean 70 MB object with MSVC, no warnings |
 | Imports | **495**, of which **489** have a derived stack purge and **455** are answered by the host's own DLLs |
 | Board imports | **40** — the OKAO Vision camera, entirely by ordinal |
-| Boots | **As far as the entry point.** The image maps at `0x00400000`, all 495 IAT slots are patched, and control reaches `0x007CB996`. Not yet run against the full lifted image |
-| Plays | No. The board needs bodies, and nothing is guessed |
+| Builds | **Yes** — all 72 translation units to a 32.8 MB native executable, no errors, no warnings |
+| Boots | **Into the C runtime.** 18 guest calls: the JVS-injection entry stub, `__security_init_cookie`, `__tmainCRTStartup`, and into the C initialiser table. Then it hits the callback gap — see below |
+| Plays | No. The callback gap first, then the board, and nothing is guessed |
 
 ### The hard part is not the CPU
 
@@ -86,6 +86,45 @@ lets the game past the call and breaks it somewhere else an hour later; a
 handler that aborts naming itself is the to-do list in the order the game wants
 it. See [systemes3recomp's docs/board-io.md](https://github.com/sp00nznet/systemes3recomp/blob/main/docs/board-io.md).
 
+### Where it stops
+
+```
+=== the guest faulted ===
+  guest image at 0x00400000, 18 dispatches so far
+  last 16 dispatches (oldest first):
+    E5300130  import LoadLibraryW (KERNEL32.dll)   <- the JVS injection stub
+    007CC173  inside the guest image               <- mainCRTStartup
+    E53000F8  import GetSystemTimeAsFileTime       <- __security_init_cookie
+    E53000C8  import GetCurrentProcessId
+    E53000CC  import GetCurrentThreadId
+    E53000FC  import GetTickCount
+    E530014C  import QueryPerformanceCounter
+    007CB99B  inside the guest image
+    007CB70B  inside the guest image
+    007CBEB0  inside the guest image
+    E53000F0  import GetStartupInfoW               <- __tmainCRTStartup
+    E5300108  import HeapSetInformation
+    E5300114  import InterlockedCompareExchange
+    007CC142  inside the guest image
+    E53002FC  import _initterm_e (MSVCR100.dll)    <- and here
+  E5300298 could not be executed   an IMPORT SENTINEL
+
+  That address is the import sentinel for __set_app_type (MSVCR100.dll).
+```
+
+Everything before that line is the recompiled game running correctly.
+
+`_initterm_e` is forwarded to the real MSVCR100, which walks the game's C
+initialiser table in `.rdata` and calls each entry — as native code, because
+the original bytes are still mapped at those addresses. So the host runs the
+*unlifted* original, and its `call [__imp___set_app_type]` reads the IAT slot
+the runtime filled with a sentinel and jumps to it.
+
+This is the callback gap, it is architectural rather than a bug, and the fix is
+already in the submodule: `hybrid_thunk()` makes an address real code can call
+that lands in lifted code. It is the one thing between here and a game that
+runs its own `main`.
+
 ### What it cost the toolkit to get here
 
 This is the first game anyone has put through pcrecomp's whole PC pipeline, and
@@ -102,6 +141,7 @@ PC-era target at once:
 | The host executable's own image base is `0x00400000` — exactly where the game wants to be | the first attempt to run it |
 | Moving the host is not enough: the loader fills that range before any user code can reserve it | the second attempt |
 | An import's identity is (DLL, name), not the name — eOkaoDt and eOkaoGn both import `ordinal_302` and they are different functions | the runtime reported 27 board imports where there are 40 |
+| The code range came from `.text`'s VirtualSize, but the loader maps the larger of VirtualSize and SizeOfRawData — and `mainCRTStartup` is 0x36 bytes past VirtualSize, in the raw tail | the full image died on its very first dispatch |
 
 ### The camera is why the toolchain changed
 

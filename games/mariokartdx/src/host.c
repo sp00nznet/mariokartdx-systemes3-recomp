@@ -34,14 +34,23 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    /* Unbuffered, because the interesting runs are the ones that die. A
+     * redirected stdout is block-buffered, so a fault takes the whole log with
+     * it and the last thing you see is from several thousand calls earlier. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
     if (guest_load(argv[1]) != 0)
         return 1;
+
+    es3_install_crash_handler();
 
     /* Give the imports bodies. hle_register_all() forwards everything the host
      * has a DLL for and reports what is left, which is the board. */
     hle_register_all();
 
     guest_init_cpu(&cpu);
+    es3_watch_cpu(&cpu);
 
     printf("[host] entering %s at %#010x (image at %#010x)\n",
            argv[1], guest_entry(), guest_image_base());
