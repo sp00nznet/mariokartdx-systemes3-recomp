@@ -1,0 +1,33 @@
+build/
+build-*/
+.vs/
+.vscode/
+*.obj
+*.lib
+*.exe
+*.dll
+*.pdb
+*.ilk
+out/
+__pycache__/
+*.pyc
+
+# The lifted game, and the catalog it came from. You generate both; they are
+# derived from Namco's binary and they do not belong in a repo.
+games/mariokartdx/generated/*
+!games/mariokartdx/generated/.gitkeep
+*catalog*.json
+
+# Game data of any kind. Bring your own.
+*.iso
+*.img
+*.dat
+*.bin
+*.zip
+Data/
+DataGlobal/
+
+# Agent scratch - never committed.
+CLAUDE.md
+.claude/
+AGENTS.md
