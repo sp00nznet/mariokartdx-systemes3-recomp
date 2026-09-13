@@ -51,14 +51,15 @@ imports    495 functions from 27 DLLs
 |---|---|
 | Target build | **v1.00.32**, the 2013 Japanese release — the smallest and the only unmodified one of the four |
 | PE parsing | **Works** on all four builds |
-| Functions recovered | **28,597** — the binary is stripped, so these are recovered by recursive descent, not read. 6 discovery rounds, 9,255,442 instructions, **99.5%** of the 4,308,348-byte code range |
-| Functions lifted | **28,596 / 28,596**, into 2,126,309 lines of C across 72 translation units. Not one failed outright |
-| Instruction coverage | **99.9737%** — 560 lines are `/* TODO */ abort()` |
+| Functions recovered | **26,075** — the binary is stripped, so these are recovered by recursive descent, not read. A first pass found 28,597 and 2,763 of those turned out to be addresses inside instructions |
+| Functions lifted | **25,838 / 25,838**, into 2,099,274 lines of C across 65 translation units. Not one failed outright |
+| Instruction coverage | **99.9928%** — 152 lines are unlifted |
 | Imports | **495**, of which **489** have a derived stack purge and **455** are answered by the host's own DLLs |
 | Board imports | **40** — the OKAO Vision camera, entirely by ordinal |
 | Builds | **Yes** — all 72 translation units to a 32.8 MB native executable, no errors, no warnings |
-| Boots | **Into the C runtime.** 18 guest calls: the JVS-injection entry stub, `__security_init_cookie`, `__tmainCRTStartup`, and into the C initialiser table. Then it hits the callback gap — see below |
-| Plays | No. The callback gap first, then the board, and nothing is guessed |
+| Boots | **Yes, into its task loop.** 13,373 guest calls: the JVS-injection entry stub, the CRT, every C++ static initialiser, `CoInitialize`, `D3DX10CreateThreadPump`, fourteen engine worker threads, then a steady `WaitForSingleObject` / `ReleaseMutex` / `Sleep` loop |
+| Renders | Not yet. It stops on thread-safety in the lifted-to-real boundary — see below |
+| Plays | No. Threads first, then the graphics stack, then the board, and nothing is guessed |
 
 ### The hard part is not the CPU
 
@@ -89,41 +90,32 @@ it. See [systemes3recomp's docs/board-io.md](https://github.com/sp00nznet/system
 ### Where it stops
 
 ```
-=== the guest faulted ===
-  guest image at 0x00400000, 18 dispatches so far
-  last 16 dispatches (oldest first):
-    E5300130  import LoadLibraryW (KERNEL32.dll)   <- the JVS injection stub
-    007CC173  inside the guest image               <- mainCRTStartup
-    E53000F8  import GetSystemTimeAsFileTime       <- __security_init_cookie
-    E53000C8  import GetCurrentProcessId
-    E53000CC  import GetCurrentThreadId
-    E53000FC  import GetTickCount
-    E530014C  import QueryPerformanceCounter
-    007CB99B  inside the guest image
-    007CB70B  inside the guest image
-    007CBEB0  inside the guest image
-    E53000F0  import GetStartupInfoW               <- __tmainCRTStartup
-    E5300108  import HeapSetInformation
-    E5300114  import InterlockedCompareExchange
-    007CC142  inside the guest image
-    E53002FC  import _initterm_e (MSVCR100.dll)    <- and here
-  E5300298 could not be executed   an IMPORT SENTINEL
+[hybrid] thread 58884 is now calling back into lifted code (1 so far)
+...
+[hybrid] thread 37920 is now calling back into lifted code (14 so far)
 
-  That address is the import sentinel for __set_app_type (MSVCR100.dll).
+=== the guest faulted ===
+  guest image at 0x00400000, 13373 dispatches so far
+    E530019C  import Sleep (KERNEL32.dll)
+    007457F0  inside the guest image
+    00745B30  inside the guest image
+    007841A0  inside the guest image
+    00744E90  inside the guest image
+    E530019C  import Sleep (KERNEL32.dll)          <- and round again
 ```
 
-Everything before that line is the recompiled game running correctly.
+That is a game that is running. The tail of the trail is a task loop, and the
+distinct imports it reached on the way include `CoInitialize` and
+`D3DX10CreateThreadPump` — COM is up and the D3DX10 async loader has its
+thread pool.
 
-`_initterm_e` is forwarded to the real MSVCR100, which walks the game's C
-initialiser table in `.rdata` and calls each entry — as native code, because
-the original bytes are still mapped at those addresses. So the host runs the
-*unlifted* original, and its `call [__imp___set_app_type]` reads the IAT slot
-the runtime filled with a sentinel and jumps to it.
-
-This is the callback gap, it is architectural rather than a bug, and the fix is
-already in the submodule: `hybrid_thunk()` makes an address real code can call
-that lands in lifted code. It is the one thing between here and a game that
-runs its own `main`.
+Two threads faulted at the same moment, which is the diagnosis rather than a
+mystery: pcrecomp's lifted-to-real marshalling is reentrant but **not
+thread-safe**, its register block is file-scope, and fourteen threads calling
+forwarded imports make a collision certain. It is written up as hybrid's
+RULE 4, along with why `__declspec(thread)` is not the fix (the TLS lookup
+needs the very registers being marshalled — that attempt took the boot from
+2,015 calls to 3) and what is: a TEB slot, which needs no registers at all.
 
 ### What it cost the toolkit to get here
 
@@ -142,6 +134,11 @@ PC-era target at once:
 | Moving the host is not enough: the loader fills that range before any user code can reserve it | the second attempt |
 | An import's identity is (DLL, name), not the name — eOkaoDt and eOkaoGn both import `ordinal_302` and they are different functions | the runtime reported 27 board imports where there are 40 |
 | The code range came from `.text`'s VirtualSize, but the loader maps the larger of VirtualSize and SizeOfRawData — and `mainCRTStartup` is 0x36 bytes past VirtualSize, in the raw tail | the full image died on its very first dispatch |
+| 2,763 "functions" were addresses inside instructions; `0x0081C100` is the third byte of `fld dword ptr [0x8E0848]` and lifted to `hlt` | the boot ran an instruction that is not in the binary |
+| Dropping one of those leaves the neighbour clamped onto an address nothing lifts | the next run stopped on an unresolved dispatch |
+| A function cut at a shared epilogue has branch targets with no body — 2,586 of them | ditto, one function later |
+| SEH is validated against the TEB's stack bounds, and lifted code never runs on that stack | `OutputDebugStringA` ended the process with no message at all |
+| hybrid's 32 KB emulated frame is not a stack for a worker thread running the game's call graph | a guard page nobody could grow |
 
 ### The camera is why the toolchain changed
 
