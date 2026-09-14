@@ -166,6 +166,32 @@ keeps the network manager from asking, and the candidate is `[0x0095A87C]` -
 the manager object, allocated by `0x00675F20`, and every network branch in the
 per-frame tick at `0x00678B20` is `cmp dword [0x95a87c], 0 / je`.
 
+### The error panel is a list, and it is readable
+
+The panel is not one error. `0x0071FDFD` walks five slots and prints the
+first, reading each as `[[[0x00959B64]] + 0x3C + 4*i]` and indexing two tables
+- `0x00932080` for the text, `0x00931EE8` for the code on the label. Read at
+runtime with
+
+    ES3_PEEK="959b64**+3c"
+
+the five come back as `38 66 66 66 66`: one error, `0x66` being the "nothing
+here" sentinel. 56 is **E05-55**, Shift-JIS for "network connection
+incomplete" - so `LOCAL NETWORK ERROR`, `ERROR AUTH NG` and `NBLINE POINTS ARE
+AT 0` are three lines of detail under a single condition, not three
+conditions.
+
+Blanked with `ES3_POKE="959b64**+3c=66"`, the next one surfaces: 70, **E08-01**,
+"NamCam (camera) error" - the OKAO Vision camera board, which this machine
+does not have either. Blank all five and the game leaves the panel and draws
+its **operator test menu** - MENU (DRIVE UNIT), GAME OPTIONS, I/O TEST,
+MONITOR TEST, SOUND TEST, NETWORK TEST, `MK3100-1-NA-MPRO-A32 (Rev.1.00.32)`,
+and `<OFFLINE OPERATION>` along the bottom.
+
+That is a poke, not a fix - but it says the gates are enumerable, that each
+one is a named condition with an address, and that there is a real interactive
+screen behind them.
+
 Ruled out by measurement on the way, so nobody repeats them:
 
 | | |
