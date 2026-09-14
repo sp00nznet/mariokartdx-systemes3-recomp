@@ -174,6 +174,112 @@ static int mk_io_board_count(CPU *c)
     return 1;
 }
 
+/*
+ * "Is the network a problem?" - answered no, once, where it is asked.
+ *
+ * 0x00679470 is the whole question. It reads
+ *
+ *     [0x0095A850]+0x94   the All.Net client's last error   (2 = DNS failed)
+ *     [0x0095A894]        the All.Net client object itself
+ *     [0x0095A894]+0xDA4  that object's "not ready" flag
+ *
+ * and returns 1 if any of them says trouble - including, first, the object
+ * simply being null. Its caller at 0x005BF4D0 then either raises E05-55 or,
+ * either way, puts the boot task into state 3, which is the screen that says
+ * `<OFFLINE OPERATION>` and `PLEASE WAIT` and never leaves.
+ *
+ * Every one of those three inputs is decided in the first seconds of the
+ * boot, and whether the object exists at all varies from run to run - the
+ * same run twice gives the panel once and the operator screen once. Holding
+ * the fields down from outside at ten hertz cannot win a race that is settled
+ * once, which is why several careful pokes did nothing.
+ *
+ * So answer the question instead of arguing with its inputs. A cabinet whose
+ * network is working answers no, and this one's is: the link finds itself,
+ * the resolver answers, and allnet.c is listening on the loopback.
+ *
+ * ES3_NO_NET_OK returns 0 from here, which lets the original run and is how
+ * to get the panel back.
+ */
+static int mk_net_ok(CPU *c)
+{
+    static int off = -1, said;
+    if (off < 0) off = getenv("ES3_NO_NET_OK") != NULL;
+    if (off) return 0;                /* not handled: the game's own runs */
+    if (!said) {
+        said = 1;
+        fprintf(stderr, "[net] the game asked whether the network is a "
+                        "problem; saying no (ES3_NO_NET_OK to let it "
+                        "decide).\n");
+    }
+    c->eax = 0;                       /* al = 0: no problem */
+    c->esp += 4;                      /* the return address, as `ret` would */
+    return 1;
+}
+
+/*
+ * The cabinet's network state, set where the boot task is about to read it.
+ *
+ * 0x005BF340 is the boot task's update. Its state is [this+0x60], and in
+ * state 1 it reaches 0x005BF516, which is where the boot either continues or
+ * stops for good:
+ *
+ *     005BF516  cmp dword [ecx+0x90], 0x67   ; All.Net said OK
+ *     005BF51D  jne ...
+ *     005BF52A  cmp byte [[0x959B5C]+0xCDC], 0
+ *     005BF530  jne 0x5bf5c5                 ; and authenticated: carry on
+ *     005BF53C  push 0x38                    ; otherwise E05-55, and
+ *     005BF549  mov [edi+0x60], 3            ; state 3 - the offline screen
+ *
+ * Nothing ever moves the state back out of 3, so the whole boot turns on one
+ * evaluation, a few seconds in. That is why holding these fields down from
+ * the watchdog at ten hertz never worked: by the time a poke resolves the
+ * chain, the decision has been taken and the state is 3 for ever.
+ *
+ * A pre-hook does not have that problem. Returning 0 leaves the original to
+ * run - see es3_guest_hle_run() - so this sets the three fields the test is
+ * about to read, on the same call, every time.
+ *
+ * What it says is what a cabinet on a working network would have: the last
+ * All.Net exchange returned 0x67, there is no pending error, and the
+ * authentication record is present. allnet.c is what would produce that if
+ * the client ever posted its PowerOn; it does not, and this stands in.
+ *
+ * ES3_NO_NET_OK leaves all of it alone.
+ */
+#define ALLNET_OK 0x67u
+
+static int mk_boot_net_state(CPU *c)
+{
+    static int off = -1, said;
+    uint32_t client, slot, obj;
+
+    if (off < 0) off = getenv("ES3_NO_NET_OK") != NULL;
+    if (off) return 0;
+
+    client = rd32(0x0095A850u);
+    if (client) {
+        if (rd32(client + 0x90u) != ALLNET_OK) {
+            wr32(client + 0x90u, ALLNET_OK);   /* the PowerOn result */
+            wr32(client + 0x94u, 0);           /* and no pending error */
+            if (!said) {
+                said = 1;
+                fprintf(stderr, "[net] telling the boot the network is up: "
+                                "All.Net result 0x67, cabinet authenticated "
+                                "(ES3_NO_NET_OK to leave it).\n");
+            }
+        }
+    }
+
+    slot = rd32(0x00959B5Cu);
+    obj = slot ? rd32(slot) : 0;
+    if (obj) {
+        wr8(obj + 0x0CDCu, 1);                 /* authenticated, and */
+        wr8(obj + 0x0CE0u, 1);                 /* the flag it is copied from */
+    }
+    return 0;                                  /* the game's own update runs */
+}
+
 int main(int argc, char **argv)
 {
     CPU cpu;
@@ -213,6 +319,8 @@ int main(int argc, char **argv)
     /* Guest functions this runtime answers itself - the cabinet, asked
      * for from inside the game rather than through a DLL. */
     es3_bind_guest(0x007A8590u, mk_io_board_count);
+    es3_bind_guest(0x00679470u, mk_net_ok);
+    es3_bind_guest(0x005BF340u, mk_boot_net_state);
 
     guest_init_cpu(&cpu);
     es3_watch_cpu(&cpu);
