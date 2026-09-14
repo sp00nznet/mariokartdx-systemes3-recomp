@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -168,6 +169,7 @@ static int mk_io_board_count(CPU *c)
             fprintf(stderr, "[board] and its cabinet ID was blank; "
                             "giving it %ls.\n", serial);
         }
+
     }
     return 1;
 }
