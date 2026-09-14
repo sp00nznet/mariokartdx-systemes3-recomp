@@ -203,6 +203,33 @@ E05-55 comes from `L_006791C0`, which asks of each of five slots: is this slot
 me - `[0x009253EC] == slot` - and if not, is it a connected peer? A cabinet
 that has adopted a virtual adapter's address is neither.
 
+### Following E05-55 back, with a debug register
+
+`ES3_WATCH_MEM` was written for this and answered it in one run. Point it at
+the error word - it takes the same chain syntax as `ES3_PEEK`, which matters
+because the word is behind two pointers into the heap and is somewhere else
+every run:
+
+    ES3_WATCH_MEM="959b64**+3c"
+    [watchmem] 0A32993C written at host 21A56373, in lifted 005C37E0
+
+and `dispatch_owner()` names the lifted function. From there `ES3_WATCH_VA`,
+which now sees direct calls, walked up the chain one run at a time:
+
+| | |
+|---|---|
+| `0x005C37E0` | `AddError(code)` - scans the five slots at `[obj+0x3C]` and appends if the code is new |
+| `0x005C2C50` | the generic raise-an-error wrapper; the code arrives as its argument |
+| `0x005BF4D0` | **the decision.** `if (0x00679470() && [[0x00959B5C]+0xCDC] == 0) raise(0x38)` |
+| `0x00679470` | true when `[0x0095A894]`, the All.Net client object, is null - or when `[0x0095A850]+0x94`, its status, is non-zero |
+| `0x00679530` | creates that object, and runs only if `[0x00952914]` is set when `0x00678410` reaches `0x006785B6` |
+
+So the panel is not about a server refusing to answer. It is about the client
+object never being constructed - and about `[[0x00959B5C]+0xCDC]`, which is
+the other way out of the `if` and reads non-zero exactly in the runs that
+reach the operator menu instead. That is a race, not a configuration: two
+runs with identical settings land differently.
+
 Ruled out by measurement on the way, so nobody repeats them:
 
 | | |
