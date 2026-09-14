@@ -259,6 +259,42 @@ static int mk_trace_raise(CPU *c)
  *
  * ES3_NO_CAMERA leaves the real enumeration in place.
  */
+/*
+ * And the honest half of the same answer: the camera check's OFF path.
+ *
+ * 0x005BEA80 is the camera task's update, and it has three ways out. With
+ * [this+0xAE0] non-zero it polls for the device and, six hundred frames later,
+ * raises E08-01. With [this+0xAE0] zero it takes 0x005BEAF0 instead - sets the
+ * state to 2, sets [this+0x4C], and the checklist line renders the string at
+ * 0x0088AC20, which is "OFF". No error, no wait, and no slot holding a mode
+ * that suppresses the task tick.
+ *
+ * That is what [this+0xAE0] is for: it is the cabinet's camera-fitted setting,
+ * and a cabinet without one says so. Saying it here is closer to the truth
+ * than mk_camera_present's "there is a device" - which is kept because it is
+ * what the probe would answer on a machine that did have a webcam, and
+ * ES3_CAMERA_ON selects it.
+ *
+ * The object arrives in ecx (the function's first act is `mov edi, ecx`).
+ */
+static int mk_camera_off(CPU *c)
+{
+    static int off = -1, said;
+    if (off < 0) off = getenv("ES3_CAMERA_ON") != NULL;
+    if (off || !c->ecx) return 0;
+    if (rd32(c->ecx + 0x0AE0u) != 0) {
+        wr32(c->ecx + 0x0AE0u, 0);
+        if (!said) {
+            said = 1;
+            fprintf(stderr, "[cam] no NAMCAM on this machine; telling the boot "
+                            "the camera is not fitted, which is the answer it "
+                            "has a checklist line for (ES3_CAMERA_ON to make "
+                            "it look for one).\n");
+        }
+    }
+    return 0;                         /* the game's own update still runs */
+}
+
 static int mk_camera_present(CPU *c)
 {
     static int off = -1, said;
@@ -485,6 +521,7 @@ int main(int argc, char **argv)
     es3_bind_guest(0x005C2C50u, mk_trace_raise);
     es3_bind_guest(0x005C1ED0u, mk_cabinet_authenticated);
     es3_bind_guest(0x0073ECF0u, mk_camera_present);
+    es3_bind_guest(0x005BEA80u, mk_camera_off);
     es3_bind_guest(0x007A8590u, mk_io_board_count);
     es3_bind_guest(0x00679470u, mk_net_ok);
     es3_bind_guest(0x005BF340u, mk_boot_net_state);
