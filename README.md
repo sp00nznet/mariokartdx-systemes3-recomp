@@ -192,6 +192,17 @@ That is a poke, not a fix - but it says the gates are enumerable, that each
 one is a named condition with an address, and that there is a real interactive
 screen behind them.
 
+And then, with the interface fix in and **nothing poked at all**, the same
+screen arrives on its own: the game leaves the error panel and draws the
+operator test menu. The runs that still showed the panel had `ES3_TRACE_NET`
+set, and printing every UDP packet slowed the link worker enough to lose its
+own race - the observer, not the observed. Turn the tracing off and the boot
+gets there.
+
+E05-55 comes from `L_006791C0`, which asks of each of five slots: is this slot
+me - `[0x009253EC] == slot` - and if not, is it a connected peer? A cabinet
+that has adopted a virtual adapter's address is neither.
+
 Ruled out by measurement on the way, so nobody repeats them:
 
 | | |
