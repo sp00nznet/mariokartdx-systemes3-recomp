@@ -59,7 +59,7 @@ imports    495 functions from 27 DLLs
 | Builds | **Yes** — all 78 translation units to a native executable, no errors, no warnings |
 | Boots | **Yes, into a frame loop.** The JVS-injection entry stub, the CRT, every C++ static initialiser, `CoInitialize`, its config off disk, a twenty-thread worker pool, a registered class, a real `mkart3` window with a working window procedure, **Direct3D 9Ex and Direct3D 10 both created**, its shader effects loaded through D3DX10, DirectInput 8 open, and D3DX10's thread pump feeding the loop through lifted callbacks |
 | Imports | **495 of 495** resolved against real DLLs when run from a game tree — the OKAO Vision camera and `JVSEmuMK.dll` ship with the game, so the cabinet's own libraries answer for themselves |
-| Renders | Not yet. The window is real, visible and the right size, and it is black. The game loads its whole data set - five million guest calls, its own `*INF*` and `*ERR*` lines - and then a thread D3DX10 created runs out of real stack |
+| Renders | Not yet, and not for a graphics reason. The window is real, framed and 1280x720; Direct3D 9Ex creates its device and returns S_OK; and the device's vtable is watched and **not one of its 120 slots is ever called**. The game is still loading, at 2.4 million guest calls a second - about 400 ns each |
 | Plays | No. A window first, then the graphics stack, and nothing is guessed |
 
 ### The hard part is not the CPU
@@ -93,37 +93,39 @@ it. See [systemes3recomp's docs/board-io.md](https://github.com/sp00nznet/system
 ```
 [hle] 495 imports forwarded to the host's own DLLs, 0 not found
 [game] *INF* Game Start
-[r2l] real code called guest 005E64A0 directly (unthunked callback 1) - sending it through a thunk
-[game] *ERR* // BlockRead !! FileName : Data/Clone/CloneParam/data/RankParam.bin
+[d3d] CreateDeviceEx returned 00000000
+[d3d] device vtable at 57D2A93C; watching 120 slots
+[screen] the game made its window 1806x972, the size of the display; putting it back to 1280x720.
 ```
 
-That is a game that is running. It makes its window, brings up both renderers,
-loads its effects and its data, and runs a frame loop with D3DX10's thread pump
-calling the game's own `ID3DX10DataLoader` methods - as lifted code.
+Everything up to drawing works. `006AB300` - the function that brings the game
+up - returns 1, where it returned 0 for the whole of the previous round.
+`004042C0` opens every subsystem. Direct3D 9Ex creates its device. The game
+loads its data and runs its frame loop, and its window is a real framed one
+that stays out of your way.
 
-It does not put anything on the screen, and after about eight seconds a thread
-*D3DX10* created runs out of real stack. `hybrid` puts the emulated frame on a
-private arena and leaves the host's own C frames on the real one - but lifted
-code carries the whole guest call graph on that real stack, one C function per
-guest function with `dispatch()` between each pair, so a callback needs far
-more of it than the original did. For a thread this runtime created that is
-fine; for a thread a library created it is not, and the overflow arrives as a
-fault the kernel cannot even dispatch:
+And not one of the device's hundred and twenty vtable slots is ever called: no
+`Present`, no `Clear`, no `BeginScene`. Which is a useful negative - what is
+left is not a graphics problem.
 
-```
-$env:ES3_DEBUG = "1"    # run the game as our own debuggee
-[debug] first chance C0000005 at 037B7A52 on thread 62332
-        in private memory at 03720000; target region 00000000 FREE (writing 7F81FDC0)
-[debug] SECOND chance C0000005 at 776F911C in ntdll.dll (reading 7F81FDA4)
-```
+What is left is speed:
 
-The second line is ntdll failing to read the stack it was trying to push an
-exception frame onto. Nothing inside the process can see that - no vectored
-handler, no unhandled filter, no TLS callback - which is why the runtime can
-now debug itself.
+| | |
+|---|---|
+| dispatches per second | **2.4 million**, about **400 ns** each |
+| guest calls per frame | about **35 million** - it is still loading |
+| hottest function | `0041EAA0`, called 97,000 times in one sampled window |
 
-**The next piece of work is for `r2l_common` to switch the real stack as well
-as the emulated one**, onto a region the arena already knows how to reserve.
+`0041EAA0` is `fabsf`. Two instructions. Every one of those calls went through
+the ring buffer, a watch check, an import-range check, a thunk check, a table
+lookup and an indirect call into a C function that sets up a CPU frame.
+
+**A direct call should be a direct call.** The lifter emits
+`dispatch(c, 0x0041EAA0u)` for `call 0x41eaa0`, and the driver knows from its
+own output that `0041EAA0` is one of the functions it lifted - so it can emit
+`L_0041EAA0(c)` instead and skip the lookup entirely. That is the next piece of
+work and it is in [systemes3recomp's README](systemes3recomp/README.md) in
+full, along with two things that were measured and did not help.
 
 ### Five things were in the way of the window, and only one was about windows
 
