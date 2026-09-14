@@ -230,6 +230,24 @@ the other way out of the `if` and reads non-zero exactly in the runs that
 reach the operator menu instead. That is a race, not a configuration: two
 runs with identical settings land differently.
 
+### Open: text rows drawn on top of each other
+
+On the operator menu and the error panel, some lines land on top of each
+other, glyph by glyph - `REMAINING TE` over `REMAINING SERVICES:`,
+`<OFFLINE OPERATION>` over `PLEASE WAIT.`, `TIME (UTC):` over
+`MK3100-1-NA-MPRO-A32 (Rev.1.00.32)`, and on the error panel `LOCAL NETWORK
+ERROR` over `ERROR AUTH NG`.
+
+What is NOT wrong: the glyphs inside each string are spaced correctly, and
+the menu list itself stacks correctly. So the font metrics are fine and the
+row pitch is fine; it is the origin handed to some rows that repeats the
+previous one.
+
+It is not the operand-order trap that `fxch` was, either. Capstone reports
+`fst`, `fstp`, `fld`, `fadd` and `faddp` with a single operand - only `fxch`
+and the `fcmov`s carry the implicit `st(0)`, and this image contains no
+`fcmov` at all. Checked, so the next person does not check it again.
+
 Ruled out by measurement on the way, so nobody repeats them:
 
 | | |
