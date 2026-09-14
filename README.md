@@ -272,6 +272,16 @@ cmake --build build --config Release
 Run it from the game tree's own directory: the game opens `Data\` and
 `DataGlobal\` by relative path.
 
+**And scan, lift and run the same file.** A tree often ships more than one
+executable, and they are not interchangeable even when they look it: this one
+has `MK_AGP3_FINAL.exe` and `MK_AGP3_FINAL_v1.00.32.exe`, the same size and
+thirty-three bytes apart, with one of the differences at the entry point - the
+patched build jumps to a stub that loads the cabinet's I/O emulator and the
+clean build does not. The lifted C is one file's instructions and reads the
+other file's constants, and the result runs without ever looking wrong. The
+driver fingerprints what it lifted from and `guest_load()` checks it, so a
+mismatch is now a paragraph at startup rather than a week.
+
 The first run looks like this, and is meant to:
 
 ```
