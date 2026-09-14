@@ -94,7 +94,7 @@ __declspec(allocate(".CRT$XLB")) PIMAGE_TLS_CALLBACK es3_tls_cb = on_detach;
  */
 static int mk_io_board_count(CPU *c)
 {
-    static int off = -1, said;
+    static int off = -1, said, said_obj;
     if (off < 0) off = getenv("ES3_NO_BOARD") != NULL;
     if (off) return 0;
     if (!said) {
@@ -104,6 +104,71 @@ static int mk_io_board_count(CPU *c)
     }
     c->eax = 1;
     c->esp += 4;                      /* the return address, as `ret` would */
+
+    /*
+     * And the cabinet's identity, which is the very next thing it asks.
+     *
+     * Answering the board count moves the slot from mode 0x51 to 0x52 - the
+     * next mode that suppresses the task tick - because 0x005C1F8D checks the
+     * twelve-character cabinet ID immediately afterwards:
+     *
+     *     005C1F8D  lea  ebx, [edi + 0x498]   ; the ID
+     *     005C1FAF  cmp  eax, 0xc             ; twelve characters
+     *     005C1FB2  jne  0x5c2206             ; no: mode 0x52
+     *     005C1FF3  call wcsspn(ID, "0123456789")
+     *     005C1FFC  cmp  eax, 0xc             ; all twelve of them digits
+     *     005C1FFF  jne  0x5c2206
+     *
+     * On a cabinet that is the serial the security keychip holds. Here the
+     * field is twelve nuls, which is why the length check fails. It is part of
+     * the same object the board check hands its answer to, reachable from the
+     * singleton at 0x00959B64, so write it in the same breath - a machine
+     * standing in for a cabinet has a serial number like any other.
+     *
+     * Only when it is empty: a real one from anywhere else wins.
+     */
+    {
+        /* Not twelve arbitrary digits: the game takes the serial apart and
+         * checks the pieces (0x005C2041 onwards).
+         *
+         *   [0..3] _wtoi  == 0xA96 (2710)     the title
+         *   [4]                               read, checked later
+         *   [5]    _wtoi  <= 3, or 4, or 9    the variant
+         *   [6..7] _wtoi  == 2                the revision
+         *   [8..11]                           the unit
+         *
+         * so "2710" "0" "0" "02" "0001". A cabinet's would differ only in the
+         * last four. */
+        static const wchar_t serial[] = L"271000020001";
+        uint32_t via_global = 0, obj = rd32(0x00959B64u);
+        if (obj) via_global = rd32(obj);
+
+        /* edi is the object the caller is working on, and it is the one the
+         * check reads two dozen instructions later. The singleton should name
+         * the same object; say so if it ever does not, because writing the
+         * serial into the wrong one looks exactly like writing it into the
+         * right one and having it ignored. */
+        if (!said_obj) {
+            said_obj = 1;
+            fprintf(stderr, "[board] object from edi %08X, from the singleton "
+                            "%08X%s\n", c->edi, via_global,
+                    c->edi == via_global ? "" : "  <- they differ");
+        }
+        /* Both copies, because the game compares them.
+         *
+         * +0x498 is the ID as read from the cabinet this run; +0x54 is the one
+         * it remembers. 0x005C2284 walks the two and sets mode 0x52 when they
+         * differ - a board that has been swapped - and the copy that syncs
+         * them (0x005C2214) only runs on the failure path we are trying not to
+         * take. Writing one and not the other trades "no ID" for "the ID
+         * changed", which is the same black screen. */
+        if (c->edi && rd16(c->edi + 0x498u) == 0) {
+            memcpy((void *)(uintptr_t)(c->edi + 0x498u), serial, sizeof serial);
+            memcpy((void *)(uintptr_t)(c->edi + 0x54u), serial, sizeof serial);
+            fprintf(stderr, "[board] and its cabinet ID was blank; "
+                            "giving it %ls.\n", serial);
+        }
+    }
     return 1;
 }
 
