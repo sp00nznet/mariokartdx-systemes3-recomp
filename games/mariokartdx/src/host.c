@@ -98,7 +98,7 @@ int main(int argc, char **argv)
     /* The guest does not return here: its exit path is ExitProcess, which the
      * forwarded kernel32 performs for real. Reaching the line below means
      * mainCRTStartup returned, which it does not do. */
-    dispatch(&cpu, guest_entry());
+    es3_enter_guest(&cpu);
 
     fprintf(stderr, "[host] the entry point returned - mainCRTStartup should not.\n");
     return 1;
