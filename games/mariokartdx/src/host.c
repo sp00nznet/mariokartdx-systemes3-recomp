@@ -312,6 +312,55 @@ static int mk_camera_present(CPU *c)
 }
 
 /*
+ * The drive board, which is the other end of a serial cable that is not here.
+ *
+ * 0x005BEBD0 is the drive-unit task, and it waits the same way the camera did:
+ *
+ *     005BED29  cmp dword [ebx+0x70], 0x12c0   ; four thousand eight hundred
+ *     005BED30  jbe 0x5bed5c                   ; frames, eighty seconds
+ *     005BED3C  cmp byte [[edi+0x180]+0x49], 0 ; did the board ever answer
+ *     005BED40  jne 0x5bed5c                   ; yes: no error
+ *     005BED4E  push 0x60                      ; no: E22-12, STR PCB comms
+ *
+ * and E22-12, like E08-01 and E05-55 before it, is a mode whose entry in the
+ * table at 0x00871A10 begins with 1 - so filing it stops the task tick and
+ * nothing is drawn again.
+ *
+ * The byte at [board+0x49] is set by the serial driver when the board speaks.
+ * It never does: ES3_TRACE_JVS shows the game opening \.\COM1 and posting a
+ * three-byte overlapped read over and over without ever writing, so the board
+ * is expected to talk first and jvs.c, which answers requests, has nothing to
+ * answer. Standing in for the flag is the same trade as answering the I/O
+ * board count: the honest answer on a machine playing the part of a cabinet is
+ * that the board is there.
+ *
+ * The object arrives in ecx; the board hangs off the system object at
+ * 0x00959B38, which is where 0x005BED32 reads it from.
+ *
+ * ES3_NO_DRIVE_BOARD leaves it to the serial port.
+ */
+static int mk_drive_board_connected(CPU *c)
+{
+    static int off = -1, said;
+    uint32_t sys, board;
+
+    if (off < 0) off = getenv("ES3_NO_DRIVE_BOARD") != NULL;
+    if (off) return 0;
+    sys = rd32(0x00959B38u);
+    board = sys ? rd32(sys + 0x180u) : 0;
+    if (board && rd8(board + 0x49u) == 0) {
+        wr8(board + 0x49u, 1);
+        if (!said) {
+            said = 1;
+            fprintf(stderr, "[board] the drive board never answered the serial "
+                            "port; saying it is connected "
+                            "(ES3_NO_DRIVE_BOARD).\n");
+        }
+    }
+    return 0;                         /* the game's own task still runs */
+}
+
+/*
  * The cabinet's security dongle, which a desktop has no slot for.
  *
  * The last gate in the boot is at 0x005BF516, and it is two conditions:
@@ -522,6 +571,7 @@ int main(int argc, char **argv)
     es3_bind_guest(0x005C1ED0u, mk_cabinet_authenticated);
     es3_bind_guest(0x0073ECF0u, mk_camera_present);
     es3_bind_guest(0x005BEA80u, mk_camera_off);
+    es3_bind_guest(0x005BEBD0u, mk_drive_board_connected);
     es3_bind_guest(0x007A8590u, mk_io_board_count);
     es3_bind_guest(0x00679470u, mk_net_ok);
     es3_bind_guest(0x005BF340u, mk_boot_net_state);
