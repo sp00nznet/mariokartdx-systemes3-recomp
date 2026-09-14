@@ -277,6 +277,38 @@ Which means forcing the tick is the wrong move: gameplay is paused on purpose
 because the game is in test mode, and the way to attract mode is to leave that
 screen.
 
+### The other half: Namco's own API, which speaks JSON
+
+The dead host is two services. All.Net is the `naominet.jp` half, with its
+`key=value` PowerOn. `amk3-stg.nbgi-amnet.jp` is Namco's own, and it is not
+All.Net at all - it is a JSON API, and it is the one this boot actually
+reaches. The paths are a UTF-16 block at `0x004766F0`:
+
+    /board/getControlData      /amid/getAmid           /amid/checkAmid
+    /amid/checkAlive           /amid/unLock            /amid/getAccessCode
+    /amid/getProvisionalAmid   /amid/updateProvisionalAmid
+    /board/saveFaceRecognition /incoming/save
+
+Answering `/0.01/board/getControlData` with an All.Net reply gets rejected in
+the game's own words, with our body quoted back:
+
+    *INF* [stat=1&uri=http://127.0.0.1/&...] このJsonの解析はフォーマットが違う
+
+"this Json's format is wrong" - which is how the format was identified. The
+fields are not guessed either: `store_id`, `allnet_game_id`,
+`allnet_game_ver`, `line_type`, `store_name`, `store_nickname`, `area_cd_0`,
+`area_name_0..3`, `country_code`, `time_zone`, `status`, `started_at`,
+`yuai_option_limit_at` are a block in `.rdata` at `0x00487BF0` - a
+getControlData response written out. Answer with those and the game says
+
+    *INF* ErrorCode:0
+
+Getting that far needs the boot past its own network test first, which is two
+pre-hooks in `games/mariokartdx/src/host.c` - `0x005BF340` and `0x00679470`.
+They have to be hooks and not `ES3_POKE`: the test at `0x005BF516` runs once,
+a few seconds in, and `[this+0x60] = 3` is never undone, so a value held down
+at ten hertz arrives after the decision every time.
+
 Ruled out by measurement on the way, so nobody repeats them:
 
 | | |
