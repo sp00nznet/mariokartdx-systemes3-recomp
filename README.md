@@ -88,64 +88,62 @@ lets the game past the call and breaks it somewhere else an hour later; a
 handler that aborts naming itself is the to-do list in the order the game wants
 it. See [systemes3recomp's docs/board-io.md](https://github.com/sp00nznet/systemes3recomp/blob/main/docs/board-io.md).
 
-### Where it stops
-
-It still presents an empty frame - `0 of 1044480` pixels non-black at every
-frame out to 8000, read out of the swap chain itself - but the game behind it
-is now running rather than parked, and the difference is measurable.
-
-Two gates were found and answered this round. The frame loop was skipping its
-own task tick:
+### It renders
 
 ```
-006AB9D2  call 0x5c38b0        ; "is any slot in a system mode?"
-006AB9D9  je   0x6aba86        ; yes: skip the rest of the frame
-006AB9FE  call 0x746b90        ; the task tick
+[shot] frame 2500 -> es3_frame_2500.bmp  1360x768, 229140 of 1044480 pixels are not black (21%)
 ```
 
-`0x005C38B0` is true when any of the five slots at `[[0x959B64]]+0x3C` holds a
-mode whose flag in the table at `0x00871A10` is 1. Slot zero held **0x51**,
-set because `0x007A8590` - "how many Namco I/O boards are on the USB bus" -
-returns zero on a desktop. Answering it with one moves the slot to **0x52**,
-set because the twelve-character cabinet ID at `+0x498` is twelve nuls. That
-ID is structured, not arbitrary (`0x005C2041` takes it apart with `_wtoi`):
+The recompiled game draws. Read out of the swap chain's own back buffer, not
+photographed off a window: a rounded red panel with a gradient and a white
+border, the game's outlined display font, **"Please call an attendant."** in
+Mario Kart yellow, error lines beneath it, `CREDIT(S) 00 / 02` in one corner
+and `MK3 Rev.1.00.32` in the other. Earlier in the boot it draws its
+**"NOW LOADING"** spinner. Every shader, the font, the 2D pipeline, the
+Direct3D 10 device and the swap chain: working.
 
-| chars | must be |
-|---|---|
-| 0-3 | 2710, the title |
-| 5 | <= 3, or 4, or 9 |
-| 6-7 | 2, the revision |
+Getting there meant answering the cabinet, one piece at a time, each found by
+following the frame loop's own refusal to tick its tasks:
 
-so `271000020001`, written into both copies the game compares - `+0x498` for
-this run and `+0x54` for what it remembers. With both answered:
-
-| | before | after |
+| what the game asked | where | answered with |
 |---|---|---|
-| slots at `[[0x959B64]]+0x3C` | `51 66 66 66 66` | `66` x5 |
-| task tick `0x00746C10` | **0** per 1M dispatches | **9** |
-| tasks registered | - | **17**, ticking 3-4 steps a frame |
-| distinct guest calls / window | 143 | **359** |
-| dispatch rate | 0.4M/s | **2.0M/s** |
-| Direct3D 11 calls / window | **0** | **20** |
+| how many I/O boards are on the USB bus | `0x007A8590` | one (`es3_bind_guest`) |
+| a twelve-character cabinet ID | `[obj+0x498]`, checked at `0x005C1F8D` | `271000020001` - the format is fixed: `2710`, then the variant, then `02`, then the unit |
+| the coin mechanism's state | `[0x009595C0]` | 2, "running" (`ES3_POKE`) |
+| the I/O board's name | `[[0x9599F8]+0x2E8]`, `strcmp`d against `"NA-JV"` | `NA-JV` |
 
-So the game ticks seventeen tasks, loads 747 models and its whole shader set
-(every `D3DX10CreateEffectFromFile` returns S_OK), grows to 760 MB and then
-settles - and asks the renderer for about two calls a frame, which is not a
-scene. Finding which task should be drawing is the next step.
+Each one, unanswered, parks a slot at `[[0x959B64]]+0x3C` in a mode whose flag
+in the table at `0x00871A10` is 1; `0x005C38B0` sees that and the frame skips
+`0x00746B90` entirely, so nothing updates, nothing is built and the back
+buffer is presented untouched. That is the whole black screen, and the modes
+walk 0x51 -> 0x52 -> 0x0D -> 0x0E -> 0x46 as each answer lets the next
+question be asked.
 
-Ruled out by measurement, so nobody repeats them:
+### What is left: All.Net
+
+The last one is not a cabinet part, it is a dead service. The game reports
+
+> ERROR DNS TIMEOUT / TIP HOST NOT FOUND
+> GAME CANNOT START UNTIL A NETWORK CONNECTION IS MADE
+
+and it means it: the boot blocks on resolving `amk3-stg.nbgi-amnet.jp`,
+Namco's All.Net authentication host, which has not existed for years. That is
+mode 0x46, timed out at `0x005BEB93`. Attract mode is behind it, and a local
+stub that answers the protocol is the next piece of work.
+
+Ruled out by measurement on the way, so nobody repeats them:
 
 | | |
 |---|---|
 | the display | D3D9 sees 0 adapters here and DXGI 6 adapters with 0 outputs, because this is a remote session - but windowed D3D10 works anyway, and `dxgi_output.c` hands DXUT the output it wanted |
 | DXUT's remote-session refusal | answered; `GetSystemMetrics(SM_REMOTESESSION)` returns 0 |
 | a modal dialog nobody clicks | printed and answered OK - that is how "Could not find any compatible Direct3D devices" was read at all |
-| occlusion | tested twice, before and after the task tick started; raising the window changes nothing |
+| occlusion | tested before and after the task tick started; raising the window changes nothing |
 | waiting longer | frame 8000, twenty minutes, working set plateaued |
-| the JVS serial board | `jvs.c` answers the protocol; the game's driver is receive-first and never transmits |
+| the JVS serial board | `jvs.c` answers the protocol; the game's driver is receive-first and never transmits, so the serial link is not the I/O path that matters |
 | `JVSEmuMK.dll` | loads, and patches code in memory - which a static recompilation never executes. `es3_guest_diff()` confirms it rewrote no guest code |
 | running the wrong build | the tree ships two executables 33 bytes apart, differing at the entry point; `guest_load()` now checks the fingerprint |
-| reading a stale swap chain | the game makes exactly one, and `es3_dxgi_present()` now tracks the latest anyway |
+| reading a stale swap chain | the game makes exactly one, and `es3_dxgi_present()` tracks the latest anyway |
 
 ### The x87 bug that cost a round
 
