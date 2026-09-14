@@ -52,14 +52,14 @@ imports    495 functions from 27 DLLs
 | Target build | **v1.00.32**, the 2013 Japanese release — the smallest and the only unmodified one of the four |
 | PE parsing | **Works** on all four builds |
 | Functions recovered | **26,075** — the binary is stripped, so these are recovered by recursive descent, not read. A first pass found 28,597 and 2,763 of those turned out to be addresses inside instructions |
-| Functions lifted | **25,838 / 25,838**, into 2,099,274 lines of C across 65 translation units. Not one failed outright |
-| Instruction coverage | **99.9928%** — 152 lines are unlifted |
+| Functions lifted | **31,096**, into 2,633,954 lines of C across 78 translation units. Not one failed outright. More than the catalog holds, because the driver now closes every address the *generated text* dispatches to - a fall-through past a clamped extent, an arm of a jump table - round after round until nothing is left open |
+| Instruction coverage | **99.966%** — 886 lines of 2.6 million are unlifted, and the game reaches none of them. The ones it did reach this round - `lock xadd`, `lock cmpxchg`, `cvtdq2ps` - went upstream into pcrecomp |
 | Imports | **495**, of which **489** have a derived stack purge and **455** are answered by the host's own DLLs |
 | Board imports | **40** — the OKAO Vision camera, entirely by ordinal |
-| Builds | **Yes** — all 72 translation units to a 32.8 MB native executable, no errors, no warnings |
-| Boots | **Yes, and stays up.** 47 million guest calls, 27 threads, no crash: the JVS-injection entry stub, the CRT, every C++ static initialiser, `CoInitialize`, its config read through `_fsopen`, `D3DX10CreateThreadPump`, a worker pool, and its window class registered |
+| Builds | **Yes** — all 78 translation units to a native executable, no errors, no warnings |
+| Boots | **Yes, into a frame loop.** The JVS-injection entry stub, the CRT, every C++ static initialiser, `CoInitialize`, its config off disk, a twenty-thread worker pool, a registered class, a real `mkart3` window with a working window procedure, **Direct3D 9Ex and Direct3D 10 both created**, its shader effects loaded through D3DX10, DirectInput 8 open, and D3DX10's thread pump feeding the loop through lifted callbacks |
 | Imports | **495 of 495** resolved against real DLLs when run from a game tree — the OKAO Vision camera and `JVSEmuMK.dll` ship with the game, so the cabinet's own libraries answer for themselves |
-| Renders | Not yet. `CreateWindowExW` returns `ERROR_NOT_ENOUGH_MEMORY` — see below |
+| Renders | Not yet. The window is real, visible and the right size, and it is black: nothing is presented, and the process ends after about twenty-five seconds with no fault and nothing in the log |
 | Plays | No. A window first, then the graphics stack, and nothing is guessed |
 
 ### The hard part is not the CPU
@@ -92,33 +92,65 @@ it. See [systemes3recomp's docs/board-io.md](https://github.com/sp00nznet/system
 
 ```
 [hle] 495 imports forwarded to the host's own DLLs, 0 not found
-[import] ... 118 of them, in order, ending at:
-[import] RegisterClassExW (USER32.dll)
-[import] CreateWindowExW (USER32.dll)
-
-[call] RegisterClassExW(0405C848) = 0000C3AA   (last error 0)
-[call] CreateWindowExW(0, class, title, WS_POPUP|WS_VISIBLE,
-                       CW_USEDEFAULT, CW_USEDEFAULT, 1360, 768,
-                       0, 0, 00400000, 0) = 00000000   (last error 8)
+[game] *INF* Game Start
+[hle] CreateWindowExW was given the guest's own image base as argument 10 -
+      passing this process's module handle instead
+[hle] DirectInput8Create was given the guest's own image base as argument 0 -
+      passing this process's module handle instead
+[r2l] real code called guest 005E64A0 directly (unthunked callback 1) - dispatching it
+[r2l] real code called guest 007D9210 directly (unthunked callback 3) - dispatching it
 ```
 
-That is a game that is running. It stays up indefinitely — 47 million guest
-calls, a worker pool, its config read off disk, D3DX10's thread pump started —
-and the only thing it cannot do is make a window.
+That is a game that is running. It makes its window, brings up both renderers,
+loads its effects, and runs a frame loop with D3DX10's thread pump calling the
+game's own `ID3DX10DataLoader` methods on its worker threads - as lifted code.
 
-`CreateWindowExW` returns NULL with **ERROR_NOT_ENOUGH_MEMORY**, both windows,
-every run. The class registers fine and returns a valid atom; its fields are
-sane; and the window procedure really is called during creation, because with
-`ES3_NO_WNDPROC_THUNK=1` the call never returns at all — USER32 runs the
-unlifted original instead of the thunk.
+What it does not do is put anything on the screen. The window is black,
+`Present` is never reached, and after about twenty-five seconds the process
+ends with no fault and no message, which is the signature of a forwarded CRT
+calling `__fastfail` or of a thread deciding the boot has failed and calling
+`ExitProcess`.
 
-Two suspects, neither proven: the first window passes `0x00400000` — the
-*guest* image base — as `hInstance`, which is not a module the host loader
-knows about, though the second passes the host's own and fails the same way;
-and the runtime's TEB stack widening leaves `NT_TIB` describing a range that
-spans both stacks and the unmapped gap between them, which USER32 does look at
-and which cannot just be removed (without it the boot dies much earlier, at
-`OutputDebugStringA`).
+Finding out which is the next job, and the instruments are in the runtime:
+
+```powershell
+$env:ES3_TRACE_IMPORTS = "1"      # the first call to each import, in order
+$env:ES3_TRACE_CALLS = "Present,CreateDeviceEx"   # arguments, result, last error
+$env:ES3_WATCH_VA = "6ab300,4042c0"   # entered from where, which thread, returning what
+.\mariokartdx.exe MK_AGP3_FINAL.exe
+py -3.11 -m tools trail es3_trail.bin MK_AGP3_FINAL.exe   # every dispatch of the boot
+```
+
+`[game]` lines are the game's own `OutputDebugString`, which on the cabinet
+went to a kernel debugger nobody was watching.
+
+### Five things were in the way of the window, and only one was about windows
+
+**The callback arena.** `hybrid`'s per-thread arena was reserved *and*
+committed whole; seventeen threads at 64 MB is most of a 32-bit address space,
+and the thread that lost got nothing - then returned 0 from every callback,
+silently. A window procedure answering 0 to `WM_NCCREATE` is exactly
+`CreateWindowExW` returning NULL and setting `ERROR_NOT_ENOUGH_MEMORY`.
+
+**A jump table one arm short.** The window procedure's message switch has ten
+arms; the lifter stopped walking at the first entry outside the function, and
+arm nine is `WM_NCCREATE`.
+
+**An extent ending mid-instruction.** `74 5B` is a two-byte `je`; read from its
+second byte it is `pop ebx`. No fault, and the guest stack one slot out from
+then on.
+
+**The guest's own HINSTANCE.** `0x00400000` is a link-time constant, not a
+module the loader knows. `DirectInput8Create` said `E_INVALIDARG`, the input
+initialiser returned false, and every subsystem open after it was skipped -
+which surfaced thirty thousand calls later as a task updating through a null
+singleton.
+
+**Real code calling guest code.** A window procedure is an argument and can be
+thunked. A COM interface the game implements is not. So the guest image is now
+mapped without execute, and an execute violation at a guest address is turned
+back into a dispatch - one handler for every unthunked callback there will ever
+be.
 
 ### What it cost the toolkit to get here
 
