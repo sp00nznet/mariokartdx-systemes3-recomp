@@ -248,6 +248,35 @@ It is not the operand-order trap that `fxch` was, either. Capstone reports
 and the `fcmov`s carry the implicit `st(0)`, and this image contains no
 `fcmov` at all. Checked, so the next person does not check it again.
 
+### A correction, and a second gate
+
+The frame loop's test is written up above as `0x005C38B0` returning true
+meaning "skip the task tick". The polarity is the other way round. The code is
+
+    006AB9D2  call 0x5c38b0
+    006AB9D7  cmp  al, 1
+    006AB9D9  je   0x6aba86      ; 1 SKIPS the tick; 0 falls through to it
+
+and `0x005C38B0` returns 1 only when some slot holds a mode whose flag in the
+table at `0x00871A10` is 1. With every slot at `0x66` it returns 0, which is
+the running case.
+
+And it is not the only gate. Immediately after it,
+
+    006AB9E2  call 0x6ffcc0
+    006AB9E7  cmp  byte [ebx + 5], 0
+    006AB9EB  jne  0x6aba12      ; jumps PAST 0x00746B90
+
+where `ebx` is the frame loop's argument - the task, from `[ebp+8]`, and the
+caller at `0x006AA78D` checks `[eax+4]` the same way to skip the frame whole.
+So `+4` and `+5` are that task's own "do not run me" flags, and they are set
+while a system screen is up. Measured with every error slot at `0x66`:
+`0x005C38B0` is called 84 times in one trail window and `0x00746B90` not once.
+
+Which means forcing the tick is the wrong move: gameplay is paused on purpose
+because the game is in test mode, and the way to attract mode is to leave that
+screen.
+
 Ruled out by measurement on the way, so nobody repeats them:
 
 | | |
