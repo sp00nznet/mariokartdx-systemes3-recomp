@@ -401,22 +401,101 @@ worse than nothing: `mk_boot_net_state` writes into `[0x0095A850]+0x90`, which
 is the live client object, and with it on the client never posts `PowerOn` at
 all.
 
-### Where it stops now: one error filed before the network is up
+### Every cabinet check, and what each one costs
 
-The boot survives indefinitely and authenticates, and the panel still reads
-`LOCAL NETWORK ERROR` / `ERROR AUTH NG` / `NBLINE POINTS ARE AT 0`. One error
-is filed, once, early:
+E08-01 was the lesson. The camera failing its boot check is not a line on a
+panel: `0x005C38B0` returns true when any of the five error slots holds a mode
+whose twelve-byte entry at `0x00871A10` begins with 1, and the frame loop skips
+the **whole task tick** when it does. Modes 56, 66, 70, 81, 82 and 96 are all
+such entries. So any one of these errors is the game building no scene at all,
+for ever - which is what "attract mode is not rendering" had been the whole
+time.
 
-    [err] AddError(56) from 005C2C89
+| error | what it is | answered by |
+|---|---|---|
+| **0x51/0x52** | no Namco I/O board on the USB bus | `mk_io_board_count`, and the twelve-digit serial in the same breath |
+| **E05-55** (56) | the cabinet is not authenticated | the dongle record, written at the gate as well as at the check |
+| **E07-11** (66) | the IC card reader answered nonsense | `jvs.c` was claiming every COM port; it now claims one |
+| **E08-01** (70) | NAMCAM, the camera | `[this+0xAE0]` zero, which is the game's own "not fitted" |
+| **E22-12** (96) | the STR PCB, over a serial cable | `[[0x00959B38]+0x180]+0x49`, the flag the driver would set |
 
-56 is E05-55. `0x005BF4D0` asks `0x00679470()` before the ALL.Net client has
-finished its `PowerOn`, gets "yes, a problem" because the object is still
-null, and the boot task goes to state 3 - which nothing moves it out of. The
-client comes up a second or two later and it is already too late.
+Two of those deserve their own note.
 
-So the remaining question is not whether the network works. It does. It is
-that the boot asks once, too early, and `NBLINE POINTS ARE AT 0` says the
-`getControlData` reply still owes the cabinet its credit balance.
+**The dongle.** `0x005C23C0` opens `F:/dongle.bin` with `fopen("rb")` and copies
+eight bytes over `[this+0xCE0]`, which the constructor copies to `[this+0xCDC]`.
+There is no F: drive here, and the game already knows what to do about that -
+`0x005C254D` sets the byte to 1 when the dongle cannot be read. It just does not
+survive: `0x005C1ED0` runs later, finds the byte zero and writes zero over both.
+So the stand-in goes in as a pre-hook on that function - and in two places,
+because `[[0x00959B5C]]` and the `0x005C1ED0` object are not always the same
+one. The board handler next door has been printing `<- they differ` all along.
+
+**The card reader.** This one was self-inflicted. `es3_jvs_open()` answered any
+COM port, and Mario Kart opens COM1 for the JVS I/O and COM2 or COM4 for the
+card reader (`0x005BD830` picks by name). Answering the card reader in JVS is
+worse than not answering it: the port opens, the game talks, and it gets replies
+that mean nothing - `0x005BD8CF` compares the result against **-301**, finds it,
+and raises E07-11. Five and a half thousand times in one run.
+
+### The serial boards speak first, which is why jvs.c has nothing to say
+
+`ES3_TRACE_JVS` on this game shows the same two lines for ever:
+
+    [jvs] SetCommTimeouts: interval 600, read 2 x n + 600
+    [jvs] read posted: 3 byte(s) into 09252632, ovl 09249530, routine 00745F40
+
+A three-byte overlapped read with a completion routine, posted again and again,
+and **not one byte ever written**. The board is expected to talk first. jvs.c is
+a JVS board that answers requests, so it waits, and the game waits, and the
+eighty-second timeout does the rest. Standing in for the one flag each board
+sets is what gets past it; making the runtime initiate is the real fix and is
+not done.
+
+### Where it stops now: OFFLINE OPERATION, and one silent exit
+
+With all of the above the boot **finishes**. Ten thousand frames, three
+minutes, no error filed - and the screen is the operator menu, with
+`<OFFLINE OPERATION>` over `PLEASE WAIT` at the bottom.
+
+That screen is not the boot waiting. It is the boot having given up quietly.
+`0x005BF4D0` asks `0x00679470` whether the network is a problem and, hearing
+yes, puts the task into state 3, which nothing moves it out of. It is also not
+test mode - `[[0x00959B38]+0x199]` and `+0x19A` both read 0.
+
+`0x00679470` is three tests: the session object exists, its status word at
+`[+0x94]` is zero, and the client's own verdict byte at `[[0x0095A894]+0xDA4]`
+is zero. The first two pass; the third is a keepalive opinion formed after the
+authentication has already succeeded, against a server that is a hundred lines
+of C in `allnet.c`. One frame in which it is set costs the run, so the hook
+answers no while the status word says the authentication is good.
+
+And one byte decides whether any of that happens at all:
+
+    004636D9  cmp byte [[0x00959B1C]+3], 0
+    004636DC  jne 0x4636f2                  ; a cabinet: authenticate
+    004636E5  call log("not a cabinet boot, so no board authentication")
+
+With it zero the All.Net exchange is skipped entirely, `0x00679470` is never
+asked, and none of the hooks that answer it print anything. With it one -
+`ES3_POKE=959b1c*+3=1` - the boot takes the path it takes on a cabinet, and
+gets further into the network than anything so far: the game logs every field
+of our PowerOn reply back, `region_name0=W`, `place_id=0123`, `country=JPN`,
+`timezone=+09:00`, so the reply is parsed and not merely tolerated.
+
+Then the process ends with code 6, a few seconds later, every time.
+
+It is not the stack this time - 48 and 64 MB die the same way, and
+`SetThreadStackGuarantee` would now make an overflow report itself. The last
+thread report before it shows every thread parked and the guest thread's last
+call at `728CECB0`, which is DXGI's Present: the game is presenting frames
+normally. The last log line is always `*INF* ErrorCode:0`, the answer to
+`/0.01/board/getControlData`, and the reply that produces it is missing nothing
+from the field block at `0x00888988` any more - `current_place_id` was the last
+name in that run of them we did not carry, and adding it changed nothing.
+
+So: the boot completes, the cabinet authenticates, and the last thing in the
+way is a death on the cabinet-boot path that `tools watch` has not yet caught,
+because under a debugger the run does not reach it.
 
 Ruled out by measurement on the way, so nobody repeats them:
 
@@ -425,13 +504,13 @@ Ruled out by measurement on the way, so nobody repeats them:
 | the display | D3D9 sees 0 adapters here and DXGI 6 adapters with 0 outputs, because this is a remote session - but windowed D3D10 works anyway, and `dxgi_output.c` hands DXUT the output it wanted |
 | DXUT's remote-session refusal | answered; `GetSystemMetrics(SM_REMOTESESSION)` returns 0 |
 | a modal dialog nobody clicks | printed and answered OK - that is how "Could not find any compatible Direct3D devices" was read at all |
-| Direct3D | it presents. `ES3_SHOT` saves the back buffer, and the panels in this README came out of it |
-| occlusion | tested before and after the task tick started; raising the window changes nothing |
-| the JVS serial board | `jvs.c` answers the protocol; the game's driver is receive-first and never transmits, so the serial link is not the I/O path that matters |
+| Direct3D | it presents. `ES3_SHOT` saves the back buffer, and every screen in this README came out of it |
+| test mode holding the operator menu | `[[0x00959B38]+0x199]` and `+0x19A` are 0 |
+| JVS input on the operator menu | all sixteen p1 bits, both p2 bits, TEST and TILT; only the clock changed |
+| `ES3_TRACE_NET` as a diagnostic on this boot | it binds four more imports and the run then stalls early and reproducibly around the I/O board. The listener prints the paths it is asked for instead |
+| a hostent of our own | it killed the process on the first name answered. `gethostbyname` now rewrites its argument and lets Winsock build the struct |
 | `JVSEmuMK.dll` | loads, and patches code in memory - which a static recompilation never executes. `es3_guest_diff()` confirms it rewrote no guest code |
 | running the wrong build | the tree ships two executables 33 bytes apart, differing at the entry point; `guest_load()` now checks the fingerprint |
-| reading a stale swap chain | the game makes exactly one, and `es3_dxgi_present()` tracks the latest anyway |
-| a hostent of our own | it crashed the process on the first name answered. `gethostbyname` now rewrites its argument and lets Winsock build the struct, so the caller gets the per-thread buffer it is entitled to |
 
 ### The x87 bug that cost a round
 
