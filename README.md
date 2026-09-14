@@ -90,43 +90,59 @@ it. See [systemes3recomp's docs/board-io.md](https://github.com/sp00nznet/system
 
 ### Where it stops
 
+It draws nothing, and the reason is now a named chain rather than a mystery.
+
+Between one `Present` and the next there is **not one Direct3D call of any
+kind** - no `Clear`, no `Draw` - and the back buffer is `0 of 1044480` pixels
+non-black at every frame from 60 to 3000, read out of the swap chain itself
+(`ES3_SHOT=`). The frame is real work: 690 guest calls across 143 functions.
+
+What it is not doing is ticking its tasks:
+
 ```
-[dxgi] no adapter in this session reports a display, so the game cannot enumerate one.
-       Handing it one that describes this desktop (1806x972, 11 modes)
-[dxgi] the game asked for an exclusive fullscreen swap chain at 1360x768; making it windowed
-[dxgi] swap chain at 57BFD0F8, Present at 728CECB0
-[shot] frame 3000 -> es3_frame_3000.bmp  1360x768, 0 of 1044480 pixels are not black (0%)
+006AB9D2  call 0x5c38b0        ; "is any slot in a suppressing mode?"
+006AB9D9  je   0x6aba86        ; yes: skip the rest of the frame
+006AB9FE  call 0x746b90        ; the task tick - called ZERO times in 1M dispatches
 ```
 
-Everything up to the picture works. `006AB300` returns 1, `004042C0` opens
-every subsystem, the window is a real framed `mkart3` one, the worker pool
-comes up, the data loads, Direct3D 10 and DXGI come up, and a frame loop runs
-at about twenty frames a second.
+`0x005C38B0` returns true when any of the five slots at `[[0x959B64]]+0x3C`
+holds a mode whose flag word in the table at `0x00871A10` is 1 - forty-one of
+the hundred-and-six modes. With no task tick the game builds no scene, and its
+graphics manager walks an empty draw list.
 
-It draws nothing. Not "draws the wrong thing" - between one `Present` and the
-next there is **not one Direct3D call of any kind**. The frame is real work:
-690 guest calls across 143 functions, an update pass through the game's own
-code and then its graphics manager, which is a set of lock-guarded accessors
-walking a list with nothing in it.
+The slots read `00000051 00000066 00000066 00000066 00000066`: slot zero in
+mode **0x51**, the rest empty. Mode 0x51 comes from here:
 
-The last thing the game does before settling is open **COM1 at 19200 8N1** and
-issue an overlapped three-byte read - a JVS packet header - to the I/O board
-that is not plugged into a desktop PC. It keeps presenting while it waits.
-Refusing the port outright (`ES3_NO_COM=1`) changes nothing, so a failed open
-is not what it is waiting for; it wants a board that answers.
+```
+005C1EEF  call 0x7a8590        ; how many Namco I/O boards are on the USB bus
+005C1EFB  cmp  eax, 1
+005C1EFE  je   0x5c1f38        ; one: get on with it
+005C1F1F  push 0x51            ; none: mode 0x51
+```
 
-Things ruled out, each by measurement rather than argument:
+`0x007A8590` enumerates USB host controllers by interface GUID and walks the
+device tree under each. On a desktop the answer is zero. `es3_bind_guest()`
+answers it with one - a cabinet has one - and the slot moves to **0x52**,
+which is the next suppressing mode. That one wants a twelve-character cabinet
+ID at `[[0x959B64]]+0x498`, and the field reads all zeros; on a cabinet it
+comes from the security keychip.
+
+So the chain is: **I/O board present** (answered) → **cabinet ID** (not) →
+whatever is behind that. Each gate is one `es3_bind_guest()` or one piece of
+board emulation away, and each is now an address rather than a guess.
+
+Ruled out by measurement, so nobody repeats them:
 
 | | |
 |---|---|
-| the display | Direct3D 9 sees 0 adapters here and DXGI 6 adapters with 0 outputs, because this is a remote session - but windowed D3D10 works anyway (`D3D10CreateDeviceAndSwapChain` + `Clear` + `Present` all succeed), and `dxgi_output.c` hands DXUT the output it wanted |
-| DXUT's remote-session refusal | answered, `GetSystemMetrics(SM_REMOTESESSION)` returns 0 |
-| a modal dialog nobody clicks | printed and answered OK; that is how "Could not find any compatible Direct3D devices" was read at all |
-| occlusion | DXUT stops rendering when `Present` returns `DXGI_STATUS_OCCLUDED`; raising the window to the foreground changed nothing |
-| the port giving up | frames 60, 200, 600, 1200, 1800, 3000 are all black; it does not advance on its own |
-
-So what is left is the cabinet, which is what the table further up always said
-the work was. The next milestone is the JVS I/O board answering.
+| the display | D3D9 sees 0 adapters here and DXGI 6 adapters with 0 outputs, because this is a remote session - but windowed D3D10 works anyway, and `dxgi_output.c` hands DXUT the output it wanted |
+| DXUT's remote-session refusal | answered; `GetSystemMetrics(SM_REMOTESESSION)` returns 0 |
+| a modal dialog nobody clicks | printed and answered OK - that is how "Could not find any compatible Direct3D devices" was read at all |
+| occlusion | DXUT stops rendering on `DXGI_STATUS_OCCLUDED`; raising the window changed nothing |
+| waiting longer | frames 60 through 3000 are all black; it does not advance on its own |
+| the JVS serial board | `jvs.c` answers the protocol; the game's driver is receive-first and never transmits, so the serial port is not what it waits for |
+| `JVSEmuMK.dll` | loads, and patches code in memory - which a static recompilation never executes. `es3_guest_diff()` confirms it rewrote no guest code |
+| running the wrong build | the tree ships two executables 33 bytes apart, differing at the entry point; `guest_load()` now checks the fingerprint |
 
 ### The x87 bug that cost a round
 

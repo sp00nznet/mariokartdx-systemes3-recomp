@@ -14,6 +14,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef _WIN32
@@ -53,6 +54,59 @@ __declspec(allocate(".CRT$XLB")) PIMAGE_TLS_CALLBACK es3_tls_cb = on_detach;
 #pragma comment(linker, "/INCLUDE:__tls_used")
 #endif
 
+
+/*
+ * The cabinet's I/O board, answered where the game asks for it.
+ *
+ * 0x007A8590 is "how many Namco I/O boards are on the USB bus". It builds the
+ * USB host controller interface GUID, enumerates every controller, walks the
+ * device tree under each one and counts the devices that match. On a cabinet
+ * that is one. On a desktop it is zero, and zero is the answer that stops the
+ * game dead:
+ *
+ *     005C1EEF  call 0x7a8590
+ *     005C1EFB  cmp eax, 1
+ *     005C1EFE  je   0x5c1f38      ; one board: get on with it
+ *     005C1F00  jle  0x5c1f1b
+ *     005C1F1F  push 0x51          ; none: mode 0x51
+ *     005C1F21  call 0x5c2c50
+ *
+ * Mode 0x51 is one of the forty-one entries in the table at 0x00871A10 whose
+ * first word is 1, and 0x005C38B0 returns true when any of the five slots at
+ * [[0x959B64]]+0x3C holds such a mode. The frame loop tests exactly that:
+ *
+ *     006AB9D2  call 0x5c38b0
+ *     006AB9D9  je   0x6aba86      ; true: skip the task tick entirely
+ *     006AB9FE  call 0x746b90      ; the task tick, never reached
+ *
+ * So with no board the game runs its frame, ticks nothing, builds no scene and
+ * presents an empty back buffer - about twenty times a second, for ever. The
+ * slot array reads 00000051 00000066 00000066 00000066 00000066: slot zero in
+ * mode 0x51, the rest empty.
+ *
+ * Emulating the USB tree underneath this would mean faking SetupAPI, the hub
+ * IOCTLs and a device descriptor, to answer a question whose honest answer on
+ * a machine standing in for a cabinet is "one". So answer it here. cdecl: the
+ * caller does its own `add esp, 4`, so only the return address is consumed.
+ *
+ * ES3_NO_BOARD leaves the real count in place, which is how to see what the
+ * game does with no I/O at all.
+ */
+static int mk_io_board_count(CPU *c)
+{
+    static int off = -1, said;
+    if (off < 0) off = getenv("ES3_NO_BOARD") != NULL;
+    if (off) return 0;
+    if (!said) {
+        said = 1;
+        fprintf(stderr, "[board] the game asked how many I/O boards are on the "
+                        "USB bus; saying one.\n");
+    }
+    c->eax = 1;
+    c->esp += 4;                      /* the return address, as `ret` would */
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     CPU cpu;
@@ -88,6 +142,10 @@ int main(int argc, char **argv)
     /* Give the imports bodies. hle_register_all() forwards everything the host
      * has a DLL for and reports what is left, which is the board. */
     hle_register_all();
+
+    /* Guest functions this runtime answers itself - the cabinet, asked
+     * for from inside the game rather than through a DLL. */
+    es3_bind_guest(0x007A8590u, mk_io_board_count);
 
     guest_init_cpu(&cpu);
     es3_watch_cpu(&cpu);
