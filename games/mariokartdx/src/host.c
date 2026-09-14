@@ -201,10 +201,30 @@ static int mk_io_board_count(CPU *c)
  * ES3_NO_NET_OK returns 0 from here, which lets the original run and is how
  * to get the panel back.
  */
+/*
+ * Every error the cabinet files, as it files it.
+ *
+ * 0x005C37E0 is AddError(code): the code arrives on the stack, the object is
+ * in edi, and the five slots it appends to are at [edi+0x3C]. The panel turns
+ * a code into a string through the table at 0x00932080, so the code is the
+ * name - 29 is ERROR DNS TIMEOUT, 28 is ERROR TIP HOST NOTFOUND, 56 is E05-55.
+ *
+ * A pre-hook rather than a watchpoint: ES3_WATCH_MEM has to resolve a heap
+ * chain before it can arm, and the errors that decide the boot are filed in
+ * the first second, before there is anything to point it at. Returns 0, so
+ * the game's own AddError still runs.
+ */
+static int mk_trace_error(CPU *c)
+{
+    fprintf(stderr, "[err] AddError(%u) from %08X, object %08X\n",
+            A32(0), rd32(c->esp), c->edi);
+    return 0;
+}
+
 static int mk_net_ok(CPU *c)
 {
     static int off = -1, said;
-    if (off < 0) off = getenv("ES3_NO_NET_OK") != NULL;
+    if (off < 0) off = getenv("ES3_FAKE_NET_OK") == NULL;
     if (off) return 0;                /* not handled: the game's own runs */
     if (!said) {
         said = 1;
@@ -254,7 +274,7 @@ static int mk_boot_net_state(CPU *c)
     static int off = -1, said;
     uint32_t client, slot, obj;
 
-    if (off < 0) off = getenv("ES3_NO_NET_OK") != NULL;
+    if (off < 0) off = getenv("ES3_FAKE_NET_OK") == NULL;
     if (off) return 0;
 
     client = rd32(0x0095A850u);
@@ -318,6 +338,7 @@ int main(int argc, char **argv)
 
     /* Guest functions this runtime answers itself - the cabinet, asked
      * for from inside the game rather than through a DLL. */
+    es3_bind_guest(0x005C37E0u, mk_trace_error);
     es3_bind_guest(0x007A8590u, mk_io_board_count);
     es3_bind_guest(0x00679470u, mk_net_ok);
     es3_bind_guest(0x005BF340u, mk_boot_net_state);

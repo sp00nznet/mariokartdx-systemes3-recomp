@@ -309,30 +309,114 @@ They have to be hooks and not `ES3_POKE`: the test at `0x005BF516` runs once,
 a few seconds in, and `[this+0x60] = 3` is never undone, so a value held down
 at ten hertz arrives after the decision every time.
 
-### Where it stops now: inside Direct3D, exit code 6
+### Exit code 6 was a stack overflow, and nothing could say so
 
-Past the network test, the boot reaches Namco's API, gets its answer, logs
-`*INF* ErrorCode:0` - and the process ends with code **6**, having logged
-nothing else.
+Past the network test the boot logged `*INF* ErrorCode:0` and the process
+ended with code **6**, having logged nothing else.
 
-It is not an orderly exit. `exit`, `_exit`, `abort` and `TerminateProcess` are
-all imported by the game and all bound to `hle_give_up`, which prints; none
-fire. `kernel32!ExitProcess` and `kernel32!TerminateProcess` are patched with
-five bytes of `jmp` each (see `es3_watch_exit`); neither fires. The TLS
-callback at DLL_PROCESS_DETACH does not run. Nothing is written to disk, and
-it is not the screen watchdog, which exits 3 and says so first.
+Every door was watched and every door stayed shut. `exit`, `_exit`, `abort`
+and `TerminateProcess` are imported by the game and bound to `hle_give_up`,
+which prints; none fired. `kernel32!ExitProcess` and `kernel32!TerminateProcess`
+were patched with five bytes of `jmp`; neither fired. `ntdll!NtTerminateProcess`
+was patched with a real trampoline - the last door, the one the other two end
+through - and it did not fire either. The TLS callback at `DLL_PROCESS_DETACH`
+did not run. There was no Windows Error Reporting record, which normally means
+another process did the killing; nothing was.
 
-What the trail does say is where the guest was: its last call on the main
-thread goes into a host DLL and never returns, and with `ES3_TRACE_HOSTCALLS`
-the traffic at that point is all `d3d11.dll`, `d3d10_1.dll`, `d3d10.dll`,
-`dxgi.dll`. The run ends inside Direct3D.
+`py -3.11 -m tools watch` answers it in one run. It launches the game with
+`DEBUG_ONLY_THIS_PROCESS` and reads the kernel's own account:
 
-Which is worth putting next to the one thing about this machine that has
-bitten before: the sessions here are remote and have no display device. Up to
-now the game drew text screens and a few sprites; past the network test it
-starts real work - thirty-two worker threads entering lifted code, resources
-by the hundred - and that is where it goes. `ES3_TRACE_D3D` is the next
-instrument, not another network probe.
+    EXCEPTION C00000FD STACK OVERFLOW at 0x234c5cc8  thread 66164  first chance
+    EXCEPTION C0000005 ACCESS VIOLATION at 0x7754f637 thread 66164  SECOND CHANCE
+
+A thread ran out of stack, and the fault while dispatching *that* fault is one
+the kernel does not try to deliver: it ends the process where it stands,
+before any user-mode handler, vectored or otherwise. That is why four hooked
+exit paths all stayed silent. `SetThreadStackGuarantee(64 KB)` now runs on
+every thread that enters lifted code, which does not prevent an overflow but
+leaves the kernel room to report one.
+
+The floor moved from 8 MB to 16, and the numbers are measured, not chosen:
+
+| stack | what happens |
+|---|---|
+| 8 MB | overflows eight seconds in; process gone, log stops mid-line |
+| 16 MB | boots |
+| 20-32 MB | thirty worker threads reserve too much; the guest's own loads start failing and the run dies at a sound file, which looks nothing like a stack |
+
+The last row is the real constraint: the thread stacks and hybrid's callback
+arenas spend the same address space. Halving the arena buys the stacks their
+room, so all three are knobs now - `ES3_THREAD_STACK_MB`, `ES3_HYBRID_ARENA_MB`,
+`ES3_HYBRID_FRAME_MB`. `ES3_HYBRID_ARENA_MB=16 ES3_THREAD_STACK_MB=32` runs.
+
+The same run also showed 176,727 first-chance access violations in nine
+seconds, 86,754 of them at one address. Those are not a bug: guest code is
+mapped without execute, so a callback that reached a real library unthunked
+faults at the address that was called and the handler dispatches the lifted
+version. It is the mechanism working. It is also most of the run's time.
+
+### The resolver was answering with the one address the client refuses
+
+With a stack it could live on, the boot got to the PCB startup checklist -
+drive unit, I/O, NAMCAM, steering, IC card reader, local network,
+authentication, update - and to `NOW LOADING`. And the ALL.Net client still
+never connected. It resolved `naominet.jp`, then `tenporouter.loc`, and
+stopped: no socket, no request, panel reading `LOCAL NETWORK ERROR` /
+`ERROR AUTH NG`.
+
+`alAbEx` validates an address before it will use one, in six instructions at
+`0x007B5EA0`: `ntohl`, reject `<= 0.255.255.255`, reject `127.0.0.0/8`, reject
+`240.0.0.0` and up. Loopback - the only address this runtime handed out - is
+the one answer it is certain is wrong. `alAbExInit` returns non-zero at
+`0x00464334`, the client's status word at `[this+0x94]` goes to 4, and
+`0x00679470` reports the network as a problem for the rest of the run.
+
+So the two resolvers now answer differently, because they have different jobs:
+
+| | |
+|---|---|
+| `gethostbyname` | `192.0.2.1` - TEST-NET-1, RFC 5737, reserved for documentation and guaranteed not to be a real host. `connect()` and `sendto()` put it back on `127.0.0.1`, where the listener is. Nothing opens a port the LAN can reach. |
+| `getaddrinfo` | `127.0.0.1` - it feeds the client's traceroute, which is a raw ICMP echo, and on a machine with no store router only loopback answers one |
+
+`getaddrinfo` was not hooked at all until this session, which is why
+`tenporouter.loc` had been timing out: the name is not resolved with
+`gethostbyname`, and `ERROR DNS TIMEOUT` / `ERROR TIP HOST NOTFOUND` was the
+panel saying so.
+
+Measured after, where before there had never been a request at all:
+
+    [game] *INF* Traceroute to 127.0.0.1, 10 hops max.
+    [game] *INF*   1 hops to destination address.
+    [allnet] connect -> 127.0.0.1:80
+    POST /sys/servlet/PowerOn HTTP/1.0
+    [allnet] /sys/servlet/PowerOn -> stat=1&uri=http://192.0.2.1/&host=192.0.2.1
+
+and `[[0x0095A850]+0x94]` reads 0 - the client is up - with the object holding
+the `http://192.0.2.1/` it was given.
+
+The two pre-hooks that used to fake a working network (`mk_net_ok`,
+`mk_boot_net_state`) are off by default now, behind `ES3_FAKE_NET_OK`. They
+were scaffolding for a dead resolver, and with the resolver working they are
+worse than nothing: `mk_boot_net_state` writes into `[0x0095A850]+0x90`, which
+is the live client object, and with it on the client never posts `PowerOn` at
+all.
+
+### Where it stops now: one error filed before the network is up
+
+The boot survives indefinitely and authenticates, and the panel still reads
+`LOCAL NETWORK ERROR` / `ERROR AUTH NG` / `NBLINE POINTS ARE AT 0`. One error
+is filed, once, early:
+
+    [err] AddError(56) from 005C2C89
+
+56 is E05-55. `0x005BF4D0` asks `0x00679470()` before the ALL.Net client has
+finished its `PowerOn`, gets "yes, a problem" because the object is still
+null, and the boot task goes to state 3 - which nothing moves it out of. The
+client comes up a second or two later and it is already too late.
+
+So the remaining question is not whether the network works. It does. It is
+that the boot asks once, too early, and `NBLINE POINTS ARE AT 0` says the
+`getControlData` reply still owes the cabinet its credit balance.
 
 Ruled out by measurement on the way, so nobody repeats them:
 
@@ -341,12 +425,13 @@ Ruled out by measurement on the way, so nobody repeats them:
 | the display | D3D9 sees 0 adapters here and DXGI 6 adapters with 0 outputs, because this is a remote session - but windowed D3D10 works anyway, and `dxgi_output.c` hands DXUT the output it wanted |
 | DXUT's remote-session refusal | answered; `GetSystemMetrics(SM_REMOTESESSION)` returns 0 |
 | a modal dialog nobody clicks | printed and answered OK - that is how "Could not find any compatible Direct3D devices" was read at all |
+| Direct3D | it presents. `ES3_SHOT` saves the back buffer, and the panels in this README came out of it |
 | occlusion | tested before and after the task tick started; raising the window changes nothing |
-| waiting longer | frame 8000, twenty minutes, working set plateaued |
 | the JVS serial board | `jvs.c` answers the protocol; the game's driver is receive-first and never transmits, so the serial link is not the I/O path that matters |
 | `JVSEmuMK.dll` | loads, and patches code in memory - which a static recompilation never executes. `es3_guest_diff()` confirms it rewrote no guest code |
 | running the wrong build | the tree ships two executables 33 bytes apart, differing at the entry point; `guest_load()` now checks the fingerprint |
 | reading a stale swap chain | the game makes exactly one, and `es3_dxgi_present()` tracks the latest anyway |
+| a hostent of our own | it crashed the process on the first name answered. `gethostbyname` now rewrites its argument and lets Winsock build the struct, so the caller gets the per-thread buffer it is entitled to |
 
 ### The x87 bug that cost a round
 
