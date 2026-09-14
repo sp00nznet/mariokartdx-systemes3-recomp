@@ -59,7 +59,7 @@ imports    495 functions from 27 DLLs
 | Builds | **Yes** — all 78 translation units to a native executable, no errors, no warnings |
 | Boots | **Yes, into a frame loop.** The JVS-injection entry stub, the CRT, every C++ static initialiser, `CoInitialize`, its config off disk, a twenty-thread worker pool, a registered class, a real `mkart3` window with a working window procedure, **Direct3D 9Ex and Direct3D 10 both created**, its shader effects loaded through D3DX10, DirectInput 8 open, and D3DX10's thread pump feeding the loop through lifted callbacks |
 | Imports | **495 of 495** resolved against real DLLs when run from a game tree — the OKAO Vision camera and `JVSEmuMK.dll` ship with the game, so the cabinet's own libraries answer for themselves |
-| Renders | Not yet. The window is real, visible and the right size, and it is black: nothing is presented, and the process ends after about twenty-five seconds with no fault and nothing in the log |
+| Renders | Not yet. The window is real, visible and the right size, and it is black. The game loads its whole data set - five million guest calls, its own `*INF*` and `*ERR*` lines - and then a thread D3DX10 created runs out of real stack |
 | Plays | No. A window first, then the graphics stack, and nothing is guessed |
 
 ### The hard part is not the CPU
@@ -93,36 +93,37 @@ it. See [systemes3recomp's docs/board-io.md](https://github.com/sp00nznet/system
 ```
 [hle] 495 imports forwarded to the host's own DLLs, 0 not found
 [game] *INF* Game Start
-[hle] CreateWindowExW was given the guest's own image base as argument 10 -
-      passing this process's module handle instead
-[hle] DirectInput8Create was given the guest's own image base as argument 0 -
-      passing this process's module handle instead
-[r2l] real code called guest 005E64A0 directly (unthunked callback 1) - dispatching it
-[r2l] real code called guest 007D9210 directly (unthunked callback 3) - dispatching it
+[r2l] real code called guest 005E64A0 directly (unthunked callback 1) - sending it through a thunk
+[game] *ERR* // BlockRead !! FileName : Data/Clone/CloneParam/data/RankParam.bin
 ```
 
 That is a game that is running. It makes its window, brings up both renderers,
-loads its effects, and runs a frame loop with D3DX10's thread pump calling the
-game's own `ID3DX10DataLoader` methods on its worker threads - as lifted code.
+loads its effects and its data, and runs a frame loop with D3DX10's thread pump
+calling the game's own `ID3DX10DataLoader` methods - as lifted code.
 
-What it does not do is put anything on the screen. The window is black,
-`Present` is never reached, and after about twenty-five seconds the process
-ends with no fault and no message, which is the signature of a forwarded CRT
-calling `__fastfail` or of a thread deciding the boot has failed and calling
-`ExitProcess`.
+It does not put anything on the screen, and after about eight seconds a thread
+*D3DX10* created runs out of real stack. `hybrid` puts the emulated frame on a
+private arena and leaves the host's own C frames on the real one - but lifted
+code carries the whole guest call graph on that real stack, one C function per
+guest function with `dispatch()` between each pair, so a callback needs far
+more of it than the original did. For a thread this runtime created that is
+fine; for a thread a library created it is not, and the overflow arrives as a
+fault the kernel cannot even dispatch:
 
-Finding out which is the next job, and the instruments are in the runtime:
-
-```powershell
-$env:ES3_TRACE_IMPORTS = "1"      # the first call to each import, in order
-$env:ES3_TRACE_CALLS = "Present,CreateDeviceEx"   # arguments, result, last error
-$env:ES3_WATCH_VA = "6ab300,4042c0"   # entered from where, which thread, returning what
-.\mariokartdx.exe MK_AGP3_FINAL.exe
-py -3.11 -m tools trail es3_trail.bin MK_AGP3_FINAL.exe   # every dispatch of the boot
+```
+$env:ES3_DEBUG = "1"    # run the game as our own debuggee
+[debug] first chance C0000005 at 037B7A52 on thread 62332
+        in private memory at 03720000; target region 00000000 FREE (writing 7F81FDC0)
+[debug] SECOND chance C0000005 at 776F911C in ntdll.dll (reading 7F81FDA4)
 ```
 
-`[game]` lines are the game's own `OutputDebugString`, which on the cabinet
-went to a kernel debugger nobody was watching.
+The second line is ntdll failing to read the stack it was trying to push an
+exception frame onto. Nothing inside the process can see that - no vectored
+handler, no unhandled filter, no TLS callback - which is why the runtime can
+now debug itself.
+
+**The next piece of work is for `r2l_common` to switch the real stack as well
+as the emulated one**, onto a region the arena already knows how to reserve.
 
 ### Five things were in the way of the window, and only one was about windows
 

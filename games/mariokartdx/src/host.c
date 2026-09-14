@@ -16,11 +16,51 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 #include "es3_rt.h"
+
+#ifdef _WIN32
+/*
+ * Who ended the run.
+ *
+ * The game stopped with exit code 0 after twenty-five seconds, with its main
+ * thread blocked in WaitForSingleObject and not one of the traced exit paths
+ * touched - no `exit`, no `ExitThread`, no `TerminateProcess`. Something
+ * called ExitProcess, and an import handler cannot see it because the guest
+ * does not import it: it is reached from inside a forwarded library, or from
+ * code this runtime never routed.
+ *
+ * A TLS callback does see it. Windows runs DLL_PROCESS_DETACH on the thread
+ * that called ExitProcess, before the process goes, so this names that thread -
+ * and the dispatch trail says what that thread was doing.
+ */
+static void NTAPI on_detach(void *h, DWORD reason, void *reserved)
+{
+    (void)h; (void)reserved;
+    if (reason != DLL_PROCESS_DETACH) return;
+    fprintf(stderr, "\n[host] the process is exiting, on thread %lu\n",
+            GetCurrentThreadId());
+    es3_report_state("who ended it");
+    fflush(stderr);
+}
+
+#pragma section(".CRT$XLB", long, read)
+__declspec(allocate(".CRT$XLB")) PIMAGE_TLS_CALLBACK es3_tls_cb = on_detach;
+#pragma comment(linker, "/INCLUDE:__tls_used")
+#endif
 
 int main(int argc, char **argv)
 {
     CPU cpu;
+
+    /* Before anything else, so the child does the work and this process only
+     * watches. Does nothing unless ES3_DEBUG is set, and never returns in the
+     * parent when it is. */
+    es3_debug_self();
 
     if (argc < 2) {
         fprintf(stderr,
