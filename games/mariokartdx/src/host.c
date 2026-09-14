@@ -221,16 +221,94 @@ static int mk_trace_error(CPU *c)
     return 0;
 }
 
+/* And the wrapper above it, which is where the interesting caller is: every
+ * AddError arrives from inside 0x005C2C50, so its own return address is the
+ * only one that names the site that decided. */
+static int mk_trace_raise(CPU *c)
+{
+    fprintf(stderr, "[err] raise(%u) from %08X\n", A32(0), rd32(c->esp));
+    return 0;
+}
+
+/*
+ * The cabinet's security dongle, which a desktop has no slot for.
+ *
+ * The last gate in the boot is at 0x005BF516, and it is two conditions:
+ *
+ *     005BF516  cmp dword [ecx+0x90], 0x67       ; All.Net said OK
+ *     005BF52A  cmp byte [[0x959B5C]+0xcdc], 0   ; and the cabinet is
+ *     005BF530  jne 0x5bf5c5                     ; authenticated: carry on
+ *     005BF53C  push 0x38                        ; otherwise E05-55
+ *
+ * The first passes now that allnet.c answers a PowerOn the client accepts.
+ * The second is the dongle. 0x005C23C0 opens `F:/dongle.bin` with fopen("rb"),
+ * and if it reads eight bytes it copies them over [this+0xCE0]; the
+ * constructor then copies that byte to [this+0xCDC], which is what the gate
+ * reads. There is no F: drive here, so the read never happens - and the game's
+ * own answer to that is at 0x005C254D:
+ *
+ *     005C254D  mov byte [edi+0xce0], 1
+ *
+ * a missing dongle reads as authenticated. It does not survive, because
+ * 0x005C1ED0 - the cabinet check that also counts I/O boards and validates the
+ * serial - runs later, finds [edi+0xcdc] already zero at 0x005C2160 and writes
+ * zero over both bytes at 0x005C21F5.
+ *
+ * So set it where that function will see it: on the way in, before its own
+ * first read. An earlier attempt set the same two bytes from the boot task's
+ * update and was overwritten a few hundred instructions later by this very
+ * function, which ES3_WATCH_MEM named.
+ *
+ * ES3_NO_DONGLE_OK leaves it alone, which is how to see the panel again.
+ */
+static int mk_cabinet_authenticated(CPU *c)
+{
+    static int off = -1, said;
+    if (off < 0) off = getenv("ES3_NO_DONGLE_OK") != NULL;
+    if (off || !c->edi) return 0;
+    if (rd8(c->edi + 0x0CDCu) == 0) {
+        wr8(c->edi + 0x0CDCu, 1);
+        wr8(c->edi + 0x0CE0u, 1);
+        if (!said) {
+            said = 1;
+            fprintf(stderr, "[board] there is no F:/dongle.bin and no drive to "
+                            "put one on; saying the cabinet is authenticated, "
+                            "which is what the game says itself when the "
+                            "dongle cannot be read (ES3_NO_DONGLE_OK).\n");
+        }
+    }
+    return 0;                         /* the game's own check still runs */
+}
+
+/*
+ * "Not yet" rather than "no".
+ *
+ * 0x00679470 answers yes-there-is-a-problem when the ALL.Net client object at
+ * [0x0095A894] is null, and 0x005BF4D0 asks it once, a second or two into the
+ * boot - before the client has finished resolving, connecting and posting its
+ * PowerOn. It gets yes, files E05-55, and puts the boot task into state 3,
+ * which nothing moves it out of. The client comes up immediately afterwards
+ * and has nowhere to report it.
+ *
+ * So the only thing held back is the answer given while the object does not
+ * exist yet. Once it does, the game's own test stands - including its verdict
+ * on [0x0095A850]+0x94, which now reads 0 because the authentication really
+ * did happen. This is a race being waited out, not a network being faked; the
+ * faking lives in mk_boot_net_state and is off by default.
+ *
+ * ES3_NO_NET_WAIT hands the question straight back.
+ */
 static int mk_net_ok(CPU *c)
 {
     static int off = -1, said;
-    if (off < 0) off = getenv("ES3_FAKE_NET_OK") == NULL;
+    if (off < 0) off = getenv("ES3_NO_NET_WAIT") != NULL;
     if (off) return 0;                /* not handled: the game's own runs */
+    if (rd32(0x0095A894u)) return 0;  /* the client is up; ask it, not us */
     if (!said) {
         said = 1;
-        fprintf(stderr, "[net] the game asked whether the network is a "
-                        "problem; saying no (ES3_NO_NET_OK to let it "
-                        "decide).\n");
+        fprintf(stderr, "[net] the boot asked about the network before the "
+                        "All.Net client existed; saying not-a-problem until "
+                        "it does (ES3_NO_NET_WAIT to answer honestly).\n");
     }
     c->eax = 0;                       /* al = 0: no problem */
     c->esp += 4;                      /* the return address, as `ret` would */
@@ -339,6 +417,8 @@ int main(int argc, char **argv)
     /* Guest functions this runtime answers itself - the cabinet, asked
      * for from inside the game rather than through a DLL. */
     es3_bind_guest(0x005C37E0u, mk_trace_error);
+    es3_bind_guest(0x005C2C50u, mk_trace_raise);
+    es3_bind_guest(0x005C1ED0u, mk_cabinet_authenticated);
     es3_bind_guest(0x007A8590u, mk_io_board_count);
     es3_bind_guest(0x00679470u, mk_net_ok);
     es3_bind_guest(0x005BF340u, mk_boot_net_state);
