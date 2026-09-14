@@ -231,6 +231,51 @@ static int mk_trace_raise(CPU *c)
 }
 
 /*
+ * NAMCAM, the cabinet's camera - E08-01, and the reason attract mode was not
+ * being drawn at all.
+ *
+ * The boot's camera task waits for the device and gives up on a count:
+ *
+ *     005BEB93  cmp dword [edi+0x70], 0x258   ; six hundred frames
+ *     005BEB9A  jbe 0x5bebb6                  ; not yet; wait
+ *     005BEB9C  cmp dword [edi+0x48], 1       ; still initialising
+ *     005BEBA8  push 0x46                     ; then E08-01
+ *
+ * and E08-01 is not just a line on a panel. 0x005C38B0 returns true when any
+ * of the five error slots holds a mode whose entry in the twelve-byte table at
+ * 0x00871A10 begins with 1, and the frame loop skips the whole task tick when
+ * it does. Mode 70 is such an entry - the same as mode 56, and the same as the
+ * 0x51 the missing I/O board used to produce. So the camera failing is the
+ * game building no scene, for ever.
+ *
+ * What it waits on is `[[0x00959B4C]+4]`, and 0x0073ECF0 is what sets it: it
+ * asks DirectShow for the video capture category, walks the monikers, checks
+ * the first one and writes 1 if it is satisfied. It is a probe and nothing
+ * else - every interface it opens is released before it returns, and the flag
+ * is the only thing that outlives it. So answering it is answering the same
+ * question the I/O board count answers: is the cabinet's hardware here.
+ *
+ * The object arrives in eax, not ecx, and the function takes no arguments.
+ *
+ * ES3_NO_CAMERA leaves the real enumeration in place.
+ */
+static int mk_camera_present(CPU *c)
+{
+    static int off = -1, said;
+    if (off < 0) off = getenv("ES3_NO_CAMERA") != NULL;
+    if (off || !c->eax) return 0;
+    if (!said) {
+        said = 1;
+        fprintf(stderr, "[cam] the game looked for the NAMCAM on the video "
+                        "capture bus; saying it is there (ES3_NO_CAMERA to let "
+                        "it look for itself).\n");
+    }
+    wr8(c->eax + 4u, 1);              /* the flag the boot task polls */
+    c->esp += 4;                      /* the return address, as `ret` would */
+    return 1;
+}
+
+/*
  * The cabinet's security dongle, which a desktop has no slot for.
  *
  * The last gate in the boot is at 0x005BF516, and it is two conditions:
@@ -261,21 +306,40 @@ static int mk_trace_raise(CPU *c)
  *
  * ES3_NO_DONGLE_OK leaves it alone, which is how to see the panel again.
  */
+/* The two places the record lives. They are not always the same object - the
+ * board handler next door prints both precisely because they differ on some
+ * runs - so write whichever of them is still zero. */
+static void mk_say_authenticated(uint32_t edi)
+{
+    uint32_t slot = rd32(0x00959B5Cu), via = slot ? rd32(slot) : 0;
+    if (via && rd8(via + 0x0CDCu) == 0) {
+        wr8(via + 0x0CDCu, 1);
+        wr8(via + 0x0CE0u, 1);
+    }
+    if (edi && rd8(edi + 0x0CDCu) == 0) {
+        wr8(edi + 0x0CDCu, 1);
+        wr8(edi + 0x0CE0u, 1);
+    }
+}
+
+static int mk_dongle_off(void)
+{
+    static int off = -1;
+    if (off < 0) off = getenv("ES3_NO_DONGLE_OK") != NULL;
+    return off;
+}
+
 static int mk_cabinet_authenticated(CPU *c)
 {
-    static int off = -1, said;
-    if (off < 0) off = getenv("ES3_NO_DONGLE_OK") != NULL;
-    if (off || !c->edi) return 0;
-    if (rd8(c->edi + 0x0CDCu) == 0) {
-        wr8(c->edi + 0x0CDCu, 1);
-        wr8(c->edi + 0x0CE0u, 1);
-        if (!said) {
-            said = 1;
-            fprintf(stderr, "[board] there is no F:/dongle.bin and no drive to "
-                            "put one on; saying the cabinet is authenticated, "
-                            "which is what the game says itself when the "
-                            "dongle cannot be read (ES3_NO_DONGLE_OK).\n");
-        }
+    static int said;
+    if (mk_dongle_off()) return 0;
+    mk_say_authenticated(c->edi);
+    if (!said) {
+        said = 1;
+        fprintf(stderr, "[board] there is no F:/dongle.bin and no drive to "
+                        "put one on; saying the cabinet is authenticated, "
+                        "which is what the game says itself when the dongle "
+                        "cannot be read (ES3_NO_DONGLE_OK).\n");
     }
     return 0;                         /* the game's own check still runs */
 }
@@ -303,6 +367,7 @@ static int mk_net_ok(CPU *c)
     static int off = -1, said;
     if (off < 0) off = getenv("ES3_NO_NET_WAIT") != NULL;
     if (off) return 0;                /* not handled: the game's own runs */
+    if (!mk_dongle_off()) mk_say_authenticated(0);
     if (rd32(0x0095A894u)) return 0;  /* the client is up; ask it, not us */
     if (!said) {
         said = 1;
@@ -419,6 +484,7 @@ int main(int argc, char **argv)
     es3_bind_guest(0x005C37E0u, mk_trace_error);
     es3_bind_guest(0x005C2C50u, mk_trace_raise);
     es3_bind_guest(0x005C1ED0u, mk_cabinet_authenticated);
+    es3_bind_guest(0x0073ECF0u, mk_camera_present);
     es3_bind_guest(0x007A8590u, mk_io_board_count);
     es3_bind_guest(0x00679470u, mk_net_ok);
     es3_bind_guest(0x005BF340u, mk_boot_net_state);
