@@ -57,9 +57,10 @@ imports    495 functions from 27 DLLs
 | Imports | **495**, of which **489** have a derived stack purge and **455** are answered by the host's own DLLs |
 | Board imports | **40** — the OKAO Vision camera, entirely by ordinal |
 | Builds | **Yes** — all 72 translation units to a 32.8 MB native executable, no errors, no warnings |
-| Boots | **Yes, into its task loop.** 13,373 guest calls: the JVS-injection entry stub, the CRT, every C++ static initialiser, `CoInitialize`, `D3DX10CreateThreadPump`, fourteen engine worker threads, then a steady `WaitForSingleObject` / `ReleaseMutex` / `Sleep` loop |
-| Renders | Not yet. It stops on thread-safety in the lifted-to-real boundary — see below |
-| Plays | No. Threads first, then the graphics stack, then the board, and nothing is guessed |
+| Boots | **Yes, and stays up.** 47 million guest calls, 27 threads, no crash: the JVS-injection entry stub, the CRT, every C++ static initialiser, `CoInitialize`, its config read through `_fsopen`, `D3DX10CreateThreadPump`, a worker pool, and its window class registered |
+| Imports | **495 of 495** resolved against real DLLs when run from a game tree — the OKAO Vision camera and `JVSEmuMK.dll` ship with the game, so the cabinet's own libraries answer for themselves |
+| Renders | Not yet. `CreateWindowExW` returns `ERROR_NOT_ENOUGH_MEMORY` — see below |
+| Plays | No. A window first, then the graphics stack, and nothing is guessed |
 
 ### The hard part is not the CPU
 
@@ -90,32 +91,34 @@ it. See [systemes3recomp's docs/board-io.md](https://github.com/sp00nznet/system
 ### Where it stops
 
 ```
-[hybrid] thread 58884 is now calling back into lifted code (1 so far)
-...
-[hybrid] thread 37920 is now calling back into lifted code (14 so far)
+[hle] 495 imports forwarded to the host's own DLLs, 0 not found
+[import] ... 118 of them, in order, ending at:
+[import] RegisterClassExW (USER32.dll)
+[import] CreateWindowExW (USER32.dll)
 
-=== the guest faulted ===
-  guest image at 0x00400000, 13373 dispatches so far
-    E530019C  import Sleep (KERNEL32.dll)
-    007457F0  inside the guest image
-    00745B30  inside the guest image
-    007841A0  inside the guest image
-    00744E90  inside the guest image
-    E530019C  import Sleep (KERNEL32.dll)          <- and round again
+[call] RegisterClassExW(0405C848) = 0000C3AA   (last error 0)
+[call] CreateWindowExW(0, class, title, WS_POPUP|WS_VISIBLE,
+                       CW_USEDEFAULT, CW_USEDEFAULT, 1360, 768,
+                       0, 0, 00400000, 0) = 00000000   (last error 8)
 ```
 
-That is a game that is running. The tail of the trail is a task loop, and the
-distinct imports it reached on the way include `CoInitialize` and
-`D3DX10CreateThreadPump` — COM is up and the D3DX10 async loader has its
-thread pool.
+That is a game that is running. It stays up indefinitely — 47 million guest
+calls, a worker pool, its config read off disk, D3DX10's thread pump started —
+and the only thing it cannot do is make a window.
 
-Two threads faulted at the same moment, which is the diagnosis rather than a
-mystery: pcrecomp's lifted-to-real marshalling is reentrant but **not
-thread-safe**, its register block is file-scope, and fourteen threads calling
-forwarded imports make a collision certain. It is written up as hybrid's
-RULE 4, along with why `__declspec(thread)` is not the fix (the TLS lookup
-needs the very registers being marshalled — that attempt took the boot from
-2,015 calls to 3) and what is: a TEB slot, which needs no registers at all.
+`CreateWindowExW` returns NULL with **ERROR_NOT_ENOUGH_MEMORY**, both windows,
+every run. The class registers fine and returns a valid atom; its fields are
+sane; and the window procedure really is called during creation, because with
+`ES3_NO_WNDPROC_THUNK=1` the call never returns at all — USER32 runs the
+unlifted original instead of the thunk.
+
+Two suspects, neither proven: the first window passes `0x00400000` — the
+*guest* image base — as `hInstance`, which is not a module the host loader
+knows about, though the second passes the host's own and fails the same way;
+and the runtime's TEB stack widening leaves `NT_TIB` describing a range that
+spans both stacks and the unmapped gap between them, which USER32 does look at
+and which cannot just be removed (without it the boot dies much earlier, at
+`OutputDebugStringA`).
 
 ### What it cost the toolkit to get here
 
