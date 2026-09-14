@@ -121,15 +121,50 @@ question be asked.
 
 ### What is left: All.Net
 
-The last one is not a cabinet part, it is a dead service. The game reports
+The last one is not a cabinet part, it is a dead service. The game reported
 
 > ERROR DNS TIMEOUT / TIP HOST NOT FOUND
 > GAME CANNOT START UNTIL A NETWORK CONNECTION IS MADE
 
-and it means it: the boot blocks on resolving `amk3-stg.nbgi-amnet.jp`,
-Namco's All.Net authentication host, which has not existed for years. That is
-mode 0x46, timed out at `0x005BEB93`. Attract mode is behind it, and a local
-stub that answers the protocol is the next piece of work.
+Behind that name is Sega's All.Net client - `alAbEx Ver 2.00.07`, statically
+linked, rolling its own HTTP over raw WS2_32 - posting to
+`http://naominet.jp/sys/servlet/PowerOn` and reading back `stat`, `uri`,
+`host`, `name`, `nickname`, `region0`, `region_name0..3`, `place_id`,
+`country`, `timezone` and a clock. Namco's own `amk3-stg.nbgi-amnet.jp` is the
+second half, over WINHTTP.
+
+`allnet.c` answers it where it asks: `gethostbyname()` returns 127.0.0.1 and a
+listener on 127.0.0.1:80 replies to `/sys/servlet/PowerOn`. No hosts file, no
+proxy, nothing off the loopback adapter. `ES3_NO_ALLNET` turns it off,
+`ES3_ALLNET_PORT` moves it, `ES3_TRACE_NET` prints every request.
+
+Two things about it are not the obvious thing, both measured. The FIRST name
+the game resolves is its own hostname, from `gethostname()` at `0x006781BF`,
+to learn the cabinet's IP - answering 127.0.0.1 to that turned `DNS TIMEOUT`
+into `LOCAL NETWORK ERROR`, because the game concluded the cabinet was on
+loopback. And the reply drains the request body before writing, because
+closing a socket with unread data sends an RST and an RST discards the reply.
+
+The DNS timeout is gone. What the screen says now is
+
+> LOCAL NETWORK ERROR / ERROR AUTH NG
+> NBLINE POINTS ARE AT 0 / PLEASE CHARGE
+
+and the next measurement is the surprising one: **the All.Net client is never
+asked**. `0x007B5470`, which picks between the PowerOn and DownloadOrder URLs,
+does not run through frame 8000. No `connect()`, no `WinHttpConnect`, no
+socket of any kind - with all of WS2_32 traced.
+
+The local network check itself passes. `WSAStartup` succeeds at `0x00678A59`,
+`SIO_GET_INTERFACE_LIST` at `0x00678382` finds a non-loopback interface and
+leaves 172.19.0.1 in `[0x00952924]`, and the network init at `0x00678410`
+returns 1 on its second call - the first returns 0 and `[0x0095291C]` counts
+0xB4 frames down to the retry.
+
+So the question is no longer what a server should answer. It is which gate
+keeps the network manager from asking, and the candidate is `[0x0095A87C]` -
+the manager object, allocated by `0x00675F20`, and every network branch in the
+per-frame tick at `0x00678B20` is `cmp dword [0x95a87c], 0 / je`.
 
 Ruled out by measurement on the way, so nobody repeats them:
 
