@@ -22,7 +22,13 @@ add_subdirectory(systemes3recomp)
 
 set(GEN "${CMAKE_CURRENT_SOURCE_DIR}/games/mariokartdx/generated")
 
-file(GLOB LIFTED "${GEN}/recomp_funcs_*.c")
+# CONFIGURE_DEPENDS, because the number of these follows the number of
+# functions and a re-lift can produce fewer. Without it the glob is evaluated
+# once, at configure time, and a build after a shorter round still names a
+# translation unit that is no longer there - or, worse, one that is there and
+# stale, whose functions are then defined twice and link with several thousand
+# LNK2005s. Re-globbing on every build costs a directory listing.
+file(GLOB LIFTED CONFIGURE_DEPENDS "${GEN}/recomp_funcs_*.c")
 if(LIFTED AND EXISTS "${GEN}/recomp_imports.h")
     add_executable(mariokartdx
         games/mariokartdx/src/host.c

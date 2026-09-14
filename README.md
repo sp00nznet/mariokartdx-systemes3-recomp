@@ -59,7 +59,7 @@ imports    495 functions from 27 DLLs
 | Builds | **Yes** — all 78 translation units to a native executable, no errors, no warnings |
 | Boots | **Yes, into a frame loop.** The JVS-injection entry stub, the CRT, every C++ static initialiser, `CoInitialize`, its config off disk, a twenty-thread worker pool, a registered class, a real `mkart3` window with a working window procedure, **Direct3D 9Ex and Direct3D 10 both created**, its shader effects loaded through D3DX10, DirectInput 8 open, and D3DX10's thread pump feeding the loop through lifted callbacks |
 | Imports | **495 of 495** resolved against real DLLs when run from a game tree — the OKAO Vision camera and `JVSEmuMK.dll` ship with the game, so the cabinet's own libraries answer for themselves |
-| Renders | **Not on this machine, and no longer for a reason in the port.** The game asks DXUT for a Direct3D device and is told there is none - correctly. Over Remote Desktop `Direct3DCreate9` reports 0 adapters, `Direct3DCreate9Ex` returns `D3DERR_NOTAVAILABLE`, and DXGI enumerates 6 adapters with 0 outputs between them. The runtime now measures all three before the guest starts and says so. Needs a console session with a display; untested there |
+| Renders | **A swap chain, a frame loop and ~20 presents a second - and an empty scene.** Direct3D 10 and a 1360x768 DXGI swap chain are created and `IDXGISwapChain::Present` is called about twenty times a second. The back buffer is read out before each present (`ES3_SHOT=`) and every frame is **1,044,480 of 1,044,480 pixels black**: no `Clear`, no `Draw`, no Direct3D 11 call at all between one present and the next. The frame itself is real - 690 guest calls across 143 functions - so the renderer is running over an empty draw list |
 | Plays | No. A window first, then the graphics stack, and nothing is guessed |
 
 ### The hard part is not the CPU
@@ -91,26 +91,42 @@ it. See [systemes3recomp's docs/board-io.md](https://github.com/sp00nznet/system
 ### Where it stops
 
 ```
-[display] THERE IS NO DIRECT3D DISPLAY IN THIS SESSION.
-          Direct3D 9 reports 0 adapter(s); DXGI reports 6 adapter(s)
-          with 0 output(s) between them.  This is a remote session.
-[hle] 495 imports forwarded to the host's own DLLs, 0 not found
-[game] *INF* Game Start
-[hle] this is a remote session, and the game refuses Direct3D on one; saying it is not.
-[game] MessageBox: mkart3 - Could not find any compatible Direct3D devices.
+[dxgi] no adapter in this session reports a display, so the game cannot enumerate one.
+       Handing it one that describes this desktop (1806x972, 11 modes)
+[dxgi] the game asked for an exclusive fullscreen swap chain at 1360x768; making it windowed
+[dxgi] swap chain at 57BFD0F8, Present at 728CECB0
+[shot] frame 3000 -> es3_frame_3000.bmp  1360x768, 0 of 1044480 pixels are not black (0%)
 ```
 
-Everything up to the display works, and the display is the machine's rather
-than the port's. `006AB300` - the function that brings the game up - returns 1.
-`004042C0` opens every subsystem. The window is a real framed `mkart3` one that
-stays out of your way, the worker pool comes up, the data loads, and the frame
-loop runs. Then DXUT enumerates adapters, skips every one that reports no
-output, finds nothing left, and says so.
+Everything up to the picture works. `006AB300` returns 1, `004042C0` opens
+every subsystem, the window is a real framed `mkart3` one, the worker pool
+comes up, the data loads, Direct3D 10 and DXGI come up, and a frame loop runs
+at about twenty frames a second.
 
-It is right. Measured in-process, 32-bit, before the guest runs:
-`Direct3DCreate9` → **0 adapters**; `Direct3DCreate9Ex` → **`D3DERR_NOTAVAILABLE`**;
-DXGI → **6 adapters, 0 outputs**. A remote session has no display device to
-find. Run it on the console.
+It draws nothing. Not "draws the wrong thing" - between one `Present` and the
+next there is **not one Direct3D call of any kind**. The frame is real work:
+690 guest calls across 143 functions, an update pass through the game's own
+code and then its graphics manager, which is a set of lock-guarded accessors
+walking a list with nothing in it.
+
+The last thing the game does before settling is open **COM1 at 19200 8N1** and
+issue an overlapped three-byte read - a JVS packet header - to the I/O board
+that is not plugged into a desktop PC. It keeps presenting while it waits.
+Refusing the port outright (`ES3_NO_COM=1`) changes nothing, so a failed open
+is not what it is waiting for; it wants a board that answers.
+
+Things ruled out, each by measurement rather than argument:
+
+| | |
+|---|---|
+| the display | Direct3D 9 sees 0 adapters here and DXGI 6 adapters with 0 outputs, because this is a remote session - but windowed D3D10 works anyway (`D3D10CreateDeviceAndSwapChain` + `Clear` + `Present` all succeed), and `dxgi_output.c` hands DXUT the output it wanted |
+| DXUT's remote-session refusal | answered, `GetSystemMetrics(SM_REMOTESESSION)` returns 0 |
+| a modal dialog nobody clicks | printed and answered OK; that is how "Could not find any compatible Direct3D devices" was read at all |
+| occlusion | DXUT stops rendering when `Present` returns `DXGI_STATUS_OCCLUDED`; raising the window to the foreground changed nothing |
+| the port giving up | frames 60, 200, 600, 1200, 1800, 3000 are all black; it does not advance on its own |
+
+So what is left is the cabinet, which is what the table further up always said
+the work was. The next milestone is the JVS I/O board answering.
 
 ### The x87 bug that cost a round
 
