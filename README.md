@@ -309,6 +309,31 @@ They have to be hooks and not `ES3_POKE`: the test at `0x005BF516` runs once,
 a few seconds in, and `[this+0x60] = 3` is never undone, so a value held down
 at ten hertz arrives after the decision every time.
 
+### Where it stops now: inside Direct3D, exit code 6
+
+Past the network test, the boot reaches Namco's API, gets its answer, logs
+`*INF* ErrorCode:0` - and the process ends with code **6**, having logged
+nothing else.
+
+It is not an orderly exit. `exit`, `_exit`, `abort` and `TerminateProcess` are
+all imported by the game and all bound to `hle_give_up`, which prints; none
+fire. `kernel32!ExitProcess` and `kernel32!TerminateProcess` are patched with
+five bytes of `jmp` each (see `es3_watch_exit`); neither fires. The TLS
+callback at DLL_PROCESS_DETACH does not run. Nothing is written to disk, and
+it is not the screen watchdog, which exits 3 and says so first.
+
+What the trail does say is where the guest was: its last call on the main
+thread goes into a host DLL and never returns, and with `ES3_TRACE_HOSTCALLS`
+the traffic at that point is all `d3d11.dll`, `d3d10_1.dll`, `d3d10.dll`,
+`dxgi.dll`. The run ends inside Direct3D.
+
+Which is worth putting next to the one thing about this machine that has
+bitten before: the sessions here are remote and have no display device. Up to
+now the game drew text screens and a few sprites; past the network test it
+starts real work - thirty-two worker threads entering lifted code, resources
+by the hundred - and that is where it goes. `ES3_TRACE_D3D` is the next
+instrument, not another network probe.
+
 Ruled out by measurement on the way, so nobody repeats them:
 
 | | |
