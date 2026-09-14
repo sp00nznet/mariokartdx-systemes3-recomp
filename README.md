@@ -59,7 +59,7 @@ imports    495 functions from 27 DLLs
 | Builds | **Yes** — all 78 translation units to a native executable, no errors, no warnings |
 | Boots | **Yes, into a frame loop.** The JVS-injection entry stub, the CRT, every C++ static initialiser, `CoInitialize`, its config off disk, a twenty-thread worker pool, a registered class, a real `mkart3` window with a working window procedure, **Direct3D 9Ex and Direct3D 10 both created**, its shader effects loaded through D3DX10, DirectInput 8 open, and D3DX10's thread pump feeding the loop through lifted callbacks |
 | Imports | **495 of 495** resolved against real DLLs when run from a game tree — the OKAO Vision camera and `JVSEmuMK.dll` ship with the game, so the cabinet's own libraries answer for themselves |
-| Renders | Not yet, and not for a graphics reason. The window is real, framed and 1280x720; Direct3D 9Ex creates its device and returns S_OK; and the device's vtable is watched and **not one of its 120 slots is ever called**. The game is still loading, at 2.4 million guest calls a second - about 400 ns each |
+| Renders | **Not on this machine, and no longer for a reason in the port.** The game asks DXUT for a Direct3D device and is told there is none - correctly. Over Remote Desktop `Direct3DCreate9` reports 0 adapters, `Direct3DCreate9Ex` returns `D3DERR_NOTAVAILABLE`, and DXGI enumerates 6 adapters with 0 outputs between them. The runtime now measures all three before the guest starts and says so. Needs a console session with a display; untested there |
 | Plays | No. A window first, then the graphics stack, and nothing is guessed |
 
 ### The hard part is not the CPU
@@ -91,22 +91,48 @@ it. See [systemes3recomp's docs/board-io.md](https://github.com/sp00nznet/system
 ### Where it stops
 
 ```
+[display] THERE IS NO DIRECT3D DISPLAY IN THIS SESSION.
+          Direct3D 9 reports 0 adapter(s); DXGI reports 6 adapter(s)
+          with 0 output(s) between them.  This is a remote session.
 [hle] 495 imports forwarded to the host's own DLLs, 0 not found
 [game] *INF* Game Start
-[d3d] CreateDeviceEx returned 00000000
-[d3d] device vtable at 57D2A93C; watching 120 slots
-[screen] the game made its window 1806x972, the size of the display; putting it back to 1280x720.
+[hle] this is a remote session, and the game refuses Direct3D on one; saying it is not.
+[game] MessageBox: mkart3 - Could not find any compatible Direct3D devices.
 ```
 
-Everything up to drawing works. `006AB300` - the function that brings the game
-up - returns 1, where it returned 0 for the whole of the previous round.
-`004042C0` opens every subsystem. Direct3D 9Ex creates its device. The game
-loads its data and runs its frame loop, and its window is a real framed one
-that stays out of your way.
+Everything up to the display works, and the display is the machine's rather
+than the port's. `006AB300` - the function that brings the game up - returns 1.
+`004042C0` opens every subsystem. The window is a real framed `mkart3` one that
+stays out of your way, the worker pool comes up, the data loads, and the frame
+loop runs. Then DXUT enumerates adapters, skips every one that reports no
+output, finds nothing left, and says so.
 
-And not one of the device's hundred and twenty vtable slots is ever called: no
-`Present`, no `Clear`, no `BeginScene`. Which is a useful negative - what is
-left is not a graphics problem.
+It is right. Measured in-process, 32-bit, before the guest runs:
+`Direct3DCreate9` → **0 adapters**; `Direct3DCreate9Ex` → **`D3DERR_NOTAVAILABLE`**;
+DXGI → **6 adapters, 0 outputs**. A remote session has no display device to
+find. Run it on the console.
+
+### The x87 bug that cost a round
+
+The frame loop above used to never finish a frame, and the reason is worth
+recording because nothing about it looked like a floating-point problem.
+
+The thread carrying the game's whole call graph was pinned inside one lifted
+function, dispatching nothing - invisible in the trail, which only records
+calls. That function is the fixed-timestep accumulator: add the delta, then
+subtract the step until what is left drops below a threshold. `fxch` was lifted
+as a swap of `st(0)` with itself, so it subtracted from the wrong register, the
+step came out negative, the accumulator grew instead of draining, and the loop
+never exited. The game booted, opened everything, loaded its data, and ticked
+one frame for ever.
+
+Capstone reports `fxch st(1)` with **both** registers, `st(0)` first, so reading
+the first operand always gives `st(0)`. 24,268 of them in this image. Next to
+it, `faddp st(1)` is `st(1) += st(0)` and was being lifted as `st(0) += st(1)`,
+which writes the result into the slot the following `fpop` discards - another
+~80,000 sites. Both were already fixed once in pcrecomp's other lifter and had
+come back in this one. Fixed upstream, with a `--selftest` that reads the
+emitted C so they cannot come back a third time.
 
 What is left is speed:
 
