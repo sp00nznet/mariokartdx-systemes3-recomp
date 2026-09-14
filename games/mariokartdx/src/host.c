@@ -312,6 +312,52 @@ static int mk_camera_present(CPU *c)
 }
 
 /*
+ * "This is a cabinet boot", which is what decides whether the board is
+ * authenticated at all.
+ *
+ * 0x004636A0 is the boot's All.Net step, and its first test is one byte:
+ *
+ *     004636D9  cmp byte [[0x00959B1C]+3], 0
+ *     004636DC  jne 0x4636f2                   ; a cabinet: authenticate
+ *     004636E5  call log("...no board authentication")
+ *     004636EA  mov byte [esi], 1              ; and mark it done
+ *
+ * and the string it logs says exactly what the zero means:
+ * "筐体起動ではないので基板認証なし" - not a cabinet boot, so no board
+ * authentication. With it zero the whole All.Net exchange is skipped, the boot
+ * task never reaches 0x005BF4D0, and the cabinet sits in <OFFLINE OPERATION>
+ * on the operator menu for ever. Nothing in this runtime was ever asked about
+ * the network, which is why none of the hooks that answer it printed anything.
+ *
+ * This machine IS standing in for a cabinet, so it says so - once, where the
+ * byte is read, rather than as a poke held down ten times a second against a
+ * field the game may want to change later.
+ *
+ * ES3_NOT_A_CABINET leaves it alone, which is how to get the operator menu
+ * back.
+ */
+static int mk_cabinet_boot(CPU *c)
+{
+    static int off = -1, said;
+    uint32_t cfg;
+
+    (void)c;
+    if (off < 0) off = getenv("ES3_NOT_A_CABINET") != NULL;
+    if (off) return 0;
+    cfg = rd32(0x00959B1Cu);
+    if (cfg && rd8(cfg + 3u) == 0) {
+        wr8(cfg + 3u, 1);
+        if (!said) {
+            said = 1;
+            fprintf(stderr, "[net] the boot was about to skip board "
+                            "authentication because this is not a cabinet; "
+                            "saying it is (ES3_NOT_A_CABINET).\n");
+        }
+    }
+    return 0;                         /* the game's own step still runs */
+}
+
+/*
  * The drive board, which is the other end of a serial cable that is not here.
  *
  * 0x005BEBD0 is the drive-unit task, and it waits the same way the camera did:
@@ -453,6 +499,83 @@ static int mk_net_ok(CPU *c)
     if (off < 0) off = getenv("ES3_NO_NET_WAIT") != NULL;
     if (off) return 0;                /* not handled: the game's own runs */
     if (!mk_dongle_off()) mk_say_authenticated(0);
+
+    /*
+     * The client's own verdict, once it has one.
+     *
+     * 0x00679470 is three tests, and the last of them is the byte at
+     * [[0x0095A894]+0xDA4] - the client's running opinion of the network,
+     * which 0x004678D0 sets from its argument when something goes wrong later.
+     * The first two pass: the client exists and its status word at
+     * [[0x0095A850]+0x94] reads 0, which is alAbExInit having succeeded and
+     * the PowerOn having been answered.
+     *
+     * What sets the verdict afterwards is the keepalive against a server that
+     * is a hundred lines of C in allnet.c, and it cannot be satisfied by
+     * answering harder - the exchange it wants is not in the executable to
+     * read. So clear it, and only while the authentication itself is good: if
+     * the status word is non-zero the client has a real complaint and the
+     * game's own answer stands.
+     *
+     * The alternative is to keep returning "no problem" from here, which hides
+     * all three tests instead of the one. This way 0x00679470 still runs and
+     * still decides.
+     */
+    {
+        uint32_t client = rd32(0x0095A894u), sess = rd32(0x0095A850u);
+        if (client && sess && rd32(sess + 0x94u) == 0 &&
+            rd8(client + 0x0DA4u) != 0) {
+            static int told;
+            wr8(client + 0x0DA4u, 0);
+            if (!told) {
+                told = 1;
+                fprintf(stderr, "[net] the All.Net client authenticated and "
+                                "then decided the network was in trouble; "
+                                "clearing its verdict, because the server it "
+                                "is talking to is this runtime "
+                                "(ES3_NO_NET_WAIT).\n");
+            }
+        }
+    }
+
+    {   /* The three inputs, once, so the answer is never a guess. */
+        static int shown;
+        uint32_t client = rd32(0x0095A894u), sess = rd32(0x0095A850u);
+        if (!shown && client) {
+            shown = 1;
+            fprintf(stderr, "[net] 0x679470 reads: session %08X status %08X, "
+                            "client %08X verdict %02X\n",
+                    sess, sess ? rd32(sess + 0x94u) : 0xFFFFFFFFu,
+                    client, rd8(client + 0x0DA4u));
+        }
+    }
+    /*
+     * And the answer itself, while the authentication is good.
+     *
+     * Clearing the verdict is not enough on its own: the boot task asks every
+     * frame, 0x005BF4D0 goes to state 3 the first time it hears yes, and
+     * nothing moves the task out of state 3 again. One frame in which the
+     * client had set its verdict and this hook had not yet cleared it is the
+     * whole run. So answer no while the session status at [[0x95A850]+0x94]
+     * reads 0 - which is alAbExInit having succeeded and PowerOn having been
+     * answered - and hand the question back the moment it does not.
+     */
+    {
+        uint32_t sess = rd32(0x0095A850u);
+        if (sess && rd32(sess + 0x94u) == 0) {
+            static int told;
+            if (!told) {
+                told = 1;
+                fprintf(stderr, "[net] the cabinet is authenticated; answering "
+                                "the boot's network question with no, while "
+                                "that stays true (ES3_NO_NET_WAIT).\n");
+            }
+            c->eax = 0;
+            c->esp += 4;
+            return 1;
+        }
+    }
+
     if (rd32(0x0095A894u)) return 0;  /* the client is up; ask it, not us */
     if (!said) {
         said = 1;
@@ -572,6 +695,7 @@ int main(int argc, char **argv)
     es3_bind_guest(0x0073ECF0u, mk_camera_present);
     es3_bind_guest(0x005BEA80u, mk_camera_off);
     es3_bind_guest(0x005BEBD0u, mk_drive_board_connected);
+    es3_bind_guest(0x004636A0u, mk_cabinet_boot);
     es3_bind_guest(0x007A8590u, mk_io_board_count);
     es3_bind_guest(0x00679470u, mk_net_ok);
     es3_bind_guest(0x005BF340u, mk_boot_net_state);
