@@ -452,6 +452,97 @@ static int mk_steering_off(CPU *c)
 }
 
 /*
+ * The IC card vendor, which is the check the boot actually stops on.
+ *
+ * With the checklist printed as text (mk_trace_check) the list ends after the
+ * line at y=364 and nothing ever posts the next one, at y=390 - which on
+ * screen is IC CARD VENDOR CHECK, the row that sits there animating while the
+ * rest of the boot waits.
+ *
+ * 0x005BF120 owns that row and has the shape every one of these has, with one
+ * difference worth writing down: its state is at [this+0x58], not [this+0x54]
+ * like the check above it. It posts "OK" (0x0088ABEC) when the state is 2 and
+ * [this+0xAD8] is above zero, and "OFF" (0x0088AC20) when it is not; until the
+ * state reaches 2 it posts nothing at all, which is the hang.
+ *
+ * Nothing can move that state here. The vendor is a serial device on COM2 or
+ * COM4, and this runtime deliberately stopped answering those ports - jvs.c
+ * was replying to the card reader in JVS, which is what E07-11 was. So the
+ * honest answer is the same one the camera and the wheel get: the check is
+ * complete, and the device is there.
+ *
+ * ES3_NO_CARD_VENDOR leaves it to the serial port, which is how to watch the
+ * boot stop here again.
+ */
+static int mk_card_vendor_done(CPU *c)
+{
+    static int off = -1, said;
+    if (off < 0) off = getenv("ES3_NO_CARD_VENDOR") != NULL;
+    if (off || !c->ecx) return 0;
+    if (rd32(c->ecx + 0x58u) != 2u) {
+        wr32(c->ecx + 0x58u, 2u);     /* the check is complete */
+        wr32(c->ecx + 0xAD8u, 1u);    /* and the vendor is there */
+        if (!said) {
+            said = 1;
+            fprintf(stderr, "[card] the IC card vendor is on a serial port "
+                            "nothing answers; saying its check is done "
+                            "(ES3_NO_CARD_VENDOR).\n");
+        }
+    }
+    return 0;                         /* the game's own task still runs */
+}
+
+/*
+ * The PCB startup checklist, as text.
+ *
+ * 0x005BF900 does not draw anything - it appends one entry to the list the
+ * startup screen renders: {string, colour, x, y}, five dwords at stride 20
+ * from [this+0x7C]. Every check passes x = 0x1F4, so every VALUE lands in the
+ * same column, and the labels are drawn wide enough to run straight into it.
+ * On screen the result is a status covered by the label to its left, which is
+ * unreadable exactly when it matters - it is the line that says which check
+ * failed.
+ *
+ * So print it. The arguments are still on the stack at entry, before the
+ * prologue: y at [esp+4], the string at [esp+8], the colour at [esp+0xC].
+ * The string is UTF-16, and the colour is worth having because the game uses
+ * 0x3B for a result it is happy with and 0x3F or 0x40 for one it is not.
+ *
+ * ES3_NO_CHECKLIST turns it off.
+ */
+static int mk_trace_check(CPU *c)
+{
+    static int off = -1;
+    uint32_t str;
+    if (off < 0) off = getenv("ES3_NO_CHECKLIST") != NULL;
+    if (off) return 0;
+    str = A32(1);
+
+    /* Copied out a code unit at a time rather than handed to %ls.
+     *
+     * %ls abandons the whole conversion the moment one unit will not convert
+     * in the current locale, and these strings are Japanese. The first line
+     * that hit one printed no text AND no newline, so every entry after it ran
+     * onto the same line - unreadable in exactly the place it was needed. */
+    {
+        char buf[128];
+        unsigned i = 0;
+        if (str) {
+            const unsigned short *w = (const unsigned short *)(uintptr_t)str;
+            for (; i + 1 < sizeof buf; i++) {
+                unsigned ch = w[i];
+                if (!ch) break;
+                buf[i] = (ch >= 0x20 && ch < 0x7F) ? (char)ch : '.';
+            }
+        }
+        buf[i] = 0;
+        fprintf(stderr, "[check] y=%-4u x=%-4u colour=%-3u %s\n",
+                A32(0), c->edx, A32(2), str ? buf : "(null)");
+    }
+    return 0;                         /* the game's own append still runs */
+}
+
+/*
  * The drive board, which is the other end of a serial cable that is not here.
  *
  * 0x005BEBD0 is the drive-unit task, and it waits the same way the camera did:
@@ -790,6 +881,8 @@ int main(int argc, char **argv)
     es3_bind_guest(0x005BEA80u, mk_camera_off);
     es3_bind_guest(0x005BEBD0u, mk_drive_board_connected);
     es3_bind_guest(0x005BEF80u, mk_steering_off);
+    es3_bind_guest(0x005BF900u, mk_trace_check);
+    es3_bind_guest(0x005BF120u, mk_card_vendor_done);
     es3_bind_guest(0x006A5140u, mk_attract_note);
     es3_bind_guest(0x005C4A80u, mk_attract_load);
     es3_bind_guest(0x004636A0u, mk_cabinet_boot);
