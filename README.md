@@ -451,66 +451,50 @@ eighty-second timeout does the rest. Standing in for the one flag each board
 sets is what gets past it; making the runtime initiate is the real fix and is
 not done.
 
-### Where it stops now: OFFLINE OPERATION, and one silent exit
+### The chain from "no attract mode" to one null pointer
 
-With all of the above the boot **finishes**. Ten thousand frames, three
-minutes, no error filed - and the screen is the operator menu, with
-`<OFFLINE OPERATION>` over `PLEASE WAIT` at the bottom.
-
-That screen is not the boot waiting. It is the boot having given up quietly.
-`0x005BF4D0` asks `0x00679470` whether the network is a problem and, hearing
-yes, puts the task into state 3, which nothing moves it out of. It is also not
-test mode - `[[0x00959B38]+0x199]` and `+0x19A` both read 0.
-
-`0x00679470` is three tests: the session object exists, its status word at
-`[+0x94]` is zero, and the client's own verdict byte at `[[0x0095A894]+0xDA4]`
-is zero. The first two pass; the third is a keepalive opinion formed after the
-authentication has already succeeded, against a server that is a hundred lines
-of C in `allnet.c`. One frame in which it is set costs the run, so the hook
-answers no while the status word says the authentication is good.
-
-And one byte decides whether any of that happens at all:
-
-    004636D9  cmp byte [[0x00959B1C]+3], 0
-    004636DC  jne 0x4636f2                  ; a cabinet: authenticate
-    004636E5  call log("not a cabinet boot, so no board authentication")
-
-With it zero the All.Net exchange is skipped entirely, `0x00679470` is never
-asked, and none of the hooks that answer it print anything. With it one -
-`ES3_POKE=959b1c*+3=1` - the boot takes the path it takes on a cabinet, and
-gets further into the network than anything so far: the game logs every field
-of our PowerOn reply back, `region_name0=W`, `place_id=0123`, `country=JPN`,
-`timezone=+09:00`, so the reply is parsed and not merely tolerated.
-
-Then the process ends with code 6, a few seconds later, every time.
-
-It is not the stack this time - 48 and 64 MB die the same way, and
-`SetThreadStackGuarantee` would now make an overflow report itself. The last
-thread report before it shows every thread parked and the guest thread's last
-call at `728CECB0`, which is DXGI's Present: the game is presenting frames
-normally. The last log line is always `*INF* ErrorCode:0`, the answer to
-`/0.01/board/getControlData`, and the reply that produces it is missing nothing
-from the field block at `0x00888988` any more - `current_place_id` was the last
-name in that run of them we did not carry, and adding it changed nothing.
-
-So: the boot completes, the cabinet authenticates, and the last thing in the
-way is a death on the cabinet-boot path that `tools watch` has not yet caught,
-because under a debugger the run does not reach it.
-
-Ruled out by measurement on the way, so nobody repeats them:
+The boot finishes and the screen is the operator menu with `<OFFLINE OPERATION>`
+over `PLEASE WAIT`. That is not the boot waiting; it is the boot having decided
+it cannot run networked. Tracing back from it, every link is now known:
 
 | | |
 |---|---|
-| the display | D3D9 sees 0 adapters here and DXGI 6 adapters with 0 outputs, because this is a remote session - but windowed D3D10 works anyway, and `dxgi_output.c` hands DXUT the output it wanted |
-| DXUT's remote-session refusal | answered; `GetSystemMetrics(SM_REMOTESESSION)` returns 0 |
-| a modal dialog nobody clicks | printed and answered OK - that is how "Could not find any compatible Direct3D devices" was read at all |
-| Direct3D | it presents. `ES3_SHOT` saves the back buffer, and every screen in this README came out of it |
-| test mode holding the operator menu | `[[0x00959B38]+0x199]` and `+0x19A` are 0 |
-| JVS input on the operator menu | all sixteen p1 bits, both p2 bits, TEST and TILT; only the clock changed |
-| `ES3_TRACE_NET` as a diagnostic on this boot | it binds four more imports and the run then stalls early and reproducibly around the I/O board. The listener prints the paths it is asked for instead |
-| a hostent of our own | it killed the process on the first name answered. `gethostbyname` now rewrites its argument and lets Winsock build the struct |
-| `JVSEmuMK.dll` | loads, and patches code in memory - which a static recompilation never executes. `es3_guest_diff()` confirms it rewrote no guest code |
-| running the wrong build | the tree ships two executables 33 bytes apart, differing at the entry point; `guest_load()` now checks the fingerprint |
+| `0x005BF50A` | `[task+0x60] = 3`, the offline state. Nothing moves the task out of it |
+| `0x005BF4D0` | reached only when `[[0x0095A850]] != 0`, the session's "initialised" byte |
+| `0x005BF516` | needs `[[0x0095A850]+0x90] == 0x67`. It reads **0** |
+| `0x00464400` | is what writes that word, from `0x007B3770` - the alAbEx poll. 0x65 is in progress, 0x67 is done, 0x69 is an error. Zero means **the poll never ran** |
+| `0x00463890` | is the poll's caller, and it returns immediately unless `[[0x00959B1C]+3]` and `[[0x0095A850]]` are both set |
+| `0x004636A0` | sets `[[0x0095A850]] = 1` at `0x0046376D`, on a straight line with no failure path - so if it runs to the end, the session is initialised |
+| `0x005BF2C7` | is the gate above all of it: `[[0x00959B1C]+3]` zero skips the whole network step, which is why nothing in this runtime was ever asked about the network. `ES3_POKE=959b1c*+3=1` sets it |
+| `0x00678D30` | then decides, and it is two tests: `[0x00952827] != 0` (it is 1) **and `[0x0095A87C] != 0`** |
+
+`[0x0095A87C]` reads **0**, every run. It is the cabinet-link object - the LAN
+between the cabinets of one bank, not All.Net - and it is never constructed.
+An earlier session had already found its other end: `[[0x95A87C]+4]+0x1C`
+staying negative is what the frame tick reports as `LOCAL NETWORK ERROR`.
+
+So the last thing in the way is a second cabinet. The link worker at
+`0x006770B0` opens a broadcast socket, sends an eight-byte `MK3` discovery
+packet and waits for a peer; with the interface fix it hears its own packet
+back, which is enough to get an address adopted and not enough to build the
+object. Either the runtime stands in for a peer on the wire, or the object has
+to be built with one node in it.
+
+Two things measured on the way that are worth not re-measuring:
+
+**The cabinet-boot path reaches NOW LOADING.** With `959b1c*+3=1` the game gets
+past the operator menu into the real game load - frame 400 is `NOW LOADING`,
+and a surviving run is at frame 1500 and beyond. It also dies with code 6 about
+one run in three, partway through that load, reporting nothing. `tools watch`
+cannot catch it: under a debugger the run never gets that far.
+
+**The death is not the reply.** Answering `getControlData` with `{"status":0}`
+made one run survive where the full reply had died, which looked decisive and
+was not. Four runs each way: the empty reply died two times in four, the full
+reply once in four. Four fields in and four fields out land on either side of
+it at random, which is what bisecting a coin flip looks like.
+`ES3_ALLNET_FIELDS=<n>` is still there for when there is something real to
+bisect.
 
 ### The x87 bug that cost a round
 
