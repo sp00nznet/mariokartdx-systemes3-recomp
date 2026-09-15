@@ -358,6 +358,48 @@ static int mk_cabinet_boot(CPU *c)
 }
 
 /*
+ * Did attract mode start? Two addresses that say so, and have never fired.
+ *
+ * 0x006A5140 builds the attract scene - it reads [0x0095A87C], the cabinet
+ * link object, at 0x006A5196 and constructs clAttractDemoLoader at 0x006A51D6.
+ * 0x005C4A80 is the loader's own entry, and the game logs "AttractType : [%d]"
+ * from 0x005C4AAE when it runs.
+ *
+ * No log this port has ever produced contains the word Attract, so neither of
+ * them has been reached. They are bound so that the moment one is, it says so
+ * - which is the difference between "attract mode is not drawing" and "attract
+ * mode was never asked for", and every hour spent on the first of those while
+ * it was really the second is an hour wasted.
+ *
+ * ES3_NO_ATTRACT_TRACE turns the two lines off.
+ */
+static int mk_attract_note(CPU *c)
+{
+    static int off = -1, said_scene, said_load;
+    uint32_t from = rd32(c->esp);
+    (void)from;
+    if (off < 0) off = getenv("ES3_NO_ATTRACT_TRACE") != NULL;
+    if (off) return 0;
+    if (!said_scene) {
+        said_scene = 1;
+        fprintf(stderr, "[attract] the attract scene is being built\n");
+    }
+    (void)said_load;
+    return 0;
+}
+
+static int mk_attract_load(CPU *c)
+{
+    static int said;
+    if (!said && !getenv("ES3_NO_ATTRACT_TRACE")) {
+        said = 1;
+        fprintf(stderr, "[attract] clAttractDemoLoader started, type %u - "
+                        "this is attract mode\n", c->eax);
+    }
+    return 0;
+}
+
+/*
  * The steering potentiometer, which is not wired to anything here.
  *
  * E23-01, STEERING VOLUME DEVICE ERROR, and like every other cabinet error it
@@ -738,6 +780,8 @@ int main(int argc, char **argv)
     es3_bind_guest(0x005BEA80u, mk_camera_off);
     es3_bind_guest(0x005BEBD0u, mk_drive_board_connected);
     es3_bind_guest(0x005BEF80u, mk_steering_off);
+    es3_bind_guest(0x006A5140u, mk_attract_note);
+    es3_bind_guest(0x005C4A80u, mk_attract_load);
     es3_bind_guest(0x004636A0u, mk_cabinet_boot);
     es3_bind_guest(0x007A8590u, mk_io_board_count);
     es3_bind_guest(0x00679470u, mk_net_ok);
