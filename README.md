@@ -16,6 +16,13 @@ the Namco System ES3 recompilation toolkit, vendored here as a git submodule.
 > The `.gitignore` refuses all of it. Bring a game tree you can already read;
 > the recompiled C is output you generate.
 
+![Mario Kart Arcade GP DX attract mode, recompiled](docs/attract-mode.png)
+
+*Attract mode, out of the recompiled executable's own swap chain — captured
+with `ES3_SHOT=`, which reads the back buffer before each present. The card
+prompt is part of the attract loop, not an error.*
+
+
 ## Why this target
 
 Not because it is easy — it is the first ES3 title anyone has taken apart — but
@@ -51,16 +58,15 @@ imports    495 functions from 27 DLLs
 |---|---|
 | Target build | **v1.00.32**, the 2013 Japanese release — the smallest and the only unmodified one of the four |
 | PE parsing | **Works** on all four builds |
-| Functions recovered | **26,075** — the binary is stripped, so these are recovered by recursive descent, not read. A first pass found 28,597 and 2,763 of those turned out to be addresses inside instructions |
-| Functions lifted | **31,096**, into 2,633,954 lines of C across 78 translation units. Not one failed outright. More than the catalog holds, because the driver now closes every address the *generated text* dispatches to - a fall-through past a clamped extent, an arm of a jump table - round after round until nothing is left open |
-| Instruction coverage | **99.966%** — 886 lines of 2.6 million are unlifted, and the game reaches none of them. The ones it did reach this round - `lock xadd`, `lock cmpxchg`, `cvtdq2ps` - went upstream into pcrecomp |
-| Imports | **495**, of which **489** have a derived stack purge and **455** are answered by the host's own DLLs |
-| Board imports | **40** — the OKAO Vision camera, entirely by ordinal |
-| Builds | **Yes** — all 78 translation units to a native executable, no errors, no warnings |
-| Boots | **Yes, into a frame loop.** The JVS-injection entry stub, the CRT, every C++ static initialiser, `CoInitialize`, its config off disk, a twenty-thread worker pool, a registered class, a real `mkart3` window with a working window procedure, **Direct3D 9Ex and Direct3D 10 both created**, its shader effects loaded through D3DX10, DirectInput 8 open, and D3DX10's thread pump feeding the loop through lifted callbacks |
+| Functions recovered | **25,757** — the binary is stripped, so these are recovered by recursive descent, not read |
+| Functions lifted | **29,645**, into 75 translation units. Not one failed outright. More than the catalog holds, because the driver closes every address the *generated text* dispatches to — a fall-through past a clamped extent, an arm of a jump table — round after round until nothing is left open |
+| Instruction coverage | **Complete for every path this game takes.** The three it stopped on this round were `cvtps2pd`, `fldln2` and `fyl2x`, each hidden behind the last, and all of them went upstream into pcrecomp along with the rest of the x87 transcendental set |
 | Imports | **495 of 495** resolved against real DLLs when run from a game tree — the OKAO Vision camera and `JVSEmuMK.dll` ship with the game, so the cabinet's own libraries answer for themselves |
-| Renders | **A swap chain, a frame loop and ~20 presents a second - and an empty scene.** Direct3D 10 and a 1360x768 DXGI swap chain are created and `IDXGISwapChain::Present` is called about twenty times a second. The back buffer is read out before each present (`ES3_SHOT=`) and every frame is **1,044,480 of 1,044,480 pixels black**: no `Clear`, no `Draw`, no Direct3D 11 call at all between one present and the next. The frame itself is real - 690 guest calls across 143 functions - so the renderer is running over an empty draw list |
-| Plays | No. A window first, then the graphics stack, and nothing is guessed |
+| Board imports | **40** — the OKAO Vision camera, entirely by ordinal |
+| Builds | **Yes** — every translation unit to a native executable |
+| Boots | **Yes, all the way through.** The JVS-injection entry stub, the CRT, every C++ static initialiser, a twenty-thread worker pool, a real `mkart3` window, Direct3D 10 and a DXGI swap chain, DirectInput 8 — and then the cabinet's own startup: drive unit, I/O board, NAMCAM, steering, IC card reader, local network, ALL.Net authentication. **No error filed in any of the five slots** |
+| Renders | **Attract mode, in full 3D.** 1360x768, 1,015,463 of 1,044,480 pixels lit, the course and karts and characters drawn and animating, the clock counting down |
+| Plays | Not yet. Attract mode is a demo the game drives itself; the wheel, pedal and coin path is the JVS I/O board, and nothing has been asked of it in anger |
 
 ### The hard part is not the CPU
 
@@ -309,10 +315,15 @@ They have to be hooks and not `ES3_POKE`: the test at `0x005BF516` runs once,
 a few seconds in, and `[this+0x60] = 3` is never undone, so a value held down
 at ten hertz arrives after the decision every time.
 
-### Exit code 6 was a stack overflow, and nothing could say so
+### There was a stack overflow too, and it was not the exit code
+
+**Read this one with the section below it.** An early death here *was* a
+stack overflow and the fix below is real - but the exit code 6 that kept
+coming back afterwards was something else entirely, and treating the two as
+one thing cost days. See "Attract mode, and the exit code that hid it".
 
 Past the network test the boot logged `*INF* ErrorCode:0` and the process
-ended with code **6**, having logged nothing else.
+ended, having logged nothing else.
 
 Every door was watched and every door stayed shut. `exit`, `_exit`, `abort`
 and `TerminateProcess` are imported by the game and bound to `hle_give_up`,
@@ -401,100 +412,82 @@ worse than nothing: `mk_boot_net_state` writes into `[0x0095A850]+0x90`, which
 is the live client object, and with it on the client never posts `PowerOn` at
 all.
 
-### Every cabinet check, and what each one costs
+### Attract mode, and the exit code that hid it
 
-E08-01 was the lesson. The camera failing its boot check is not a line on a
-panel: `0x005C38B0` returns true when any of the five error slots holds a mode
-whose twelve-byte entry at `0x00871A10` begins with 1, and the frame loop skips
-the **whole task tick** when it does. Modes 56, 66, 70, 81, 82 and 96 are all
-such entries. So any one of these errors is the game building no scene at all,
-for ever - which is what "attract mode is not rendering" had been the whole
-time.
+The boot finishes, the cabinet authenticates, and the game draws its attract
+loop. Getting there was two different problems wearing the same disguise.
+
+**Everything the cabinet checks, answered.** Each of these is a mode whose
+entry in the table at `0x00871A10` begins with 1, and `0x005C38B0` returns true
+when any error slot holds such a mode — at which point the frame loop skips the
+**whole task tick** and the game builds no scene at all. So each one of them,
+on its own, is a black screen:
 
 | error | what it is | answered by |
 |---|---|---|
 | **0x51/0x52** | no Namco I/O board on the USB bus | `mk_io_board_count`, and the twelve-digit serial in the same breath |
-| **E05-55** (56) | the cabinet is not authenticated | the dongle record, written at the gate as well as at the check |
-| **E07-11** (66) | the IC card reader answered nonsense | `jvs.c` was claiming every COM port; it now claims one |
+| **E05-55** (56) | the cabinet is not authenticated | the `F:/dongle.bin` record, written at the gate as well as at the check — and at *both* objects, because `[[0x00959B5C]]` and the `0x005C1ED0` object are not always the same one |
+| **E07-11** (66) | the IC card reader answered nonsense | self-inflicted: `jvs.c` was claiming every COM port and answering the card reader in JVS. It claims one now |
 | **E08-01** (70) | NAMCAM, the camera | `[this+0xAE0]` zero, which is the game's own "not fitted" |
 | **E22-12** (96) | the STR PCB, over a serial cable | `[[0x00959B38]+0x180]+0x49`, the flag the driver would set |
+| **E23-01** (97) | the steering potentiometer | the camera's shape exactly — state 2 at `[this+0x54]`, fitted-or-not at `[this+0xAD8]` |
 
-Two of those deserve their own note.
+**And one byte decides whether any of it happens.** `0x004636D9` reads
+`[[0x00959B1C]+3]`, and with it zero the game logs 筐体起動ではないので基板認証なし
+— *not a cabinet boot, so no board authentication* — and skips ALL.Net
+entirely. `ES3_POKE=959b1c*+3=1` is what puts this machine on the path a
+cabinet takes.
 
-**The dongle.** `0x005C23C0` opens `F:/dongle.bin` with `fopen("rb")` and copies
-eight bytes over `[this+0xCE0]`, which the constructor copies to `[this+0xCDC]`.
-There is no F: drive here, and the game already knows what to do about that -
-`0x005C254D` sets the byte to 1 when the dongle cannot be read. It just does not
-survive: `0x005C1ED0` runs later, finds the byte zero and writes zero over both.
-So the stand-in goes in as a pre-hook on that function - and in two places,
-because `[[0x00959B5C]]` and the `0x005C1ED0` object are not always the same
-one. The board handler next door has been printing `<- they differ` all along.
+**Then: exit code 6.** A number belonging to nothing in the source. It was
+chased through every exit door this runtime can watch — the guest's own
+`exit`/`_exit`/`abort`/`_cexit` imports, `kernel32!ExitProcess`,
+`kernel32!TerminateProcess`, `ntdll!NtTerminateProcess` with a trampoline, the
+TLS detach callback, the vectored handler, and finally an unhandled-exception
+filter added for the purpose. Every one silent. No Windows Error Reporting
+record. No fault.
 
-**The card reader.** This one was self-inflicted. `es3_jvs_open()` answered any
-COM port, and Mario Kart opens COM1 for the JVS I/O and COM2 or COM4 for the
-card reader (`0x005BD830` picks by name). Answering the card reader in JVS is
-worse than not answering it: the port opens, the game talks, and it gets replies
-that mean nothing - `0x005BD8CF` compares the result against **-301**, finds it,
-and raises E07-11. Five and a half thousand times in one run.
+Read through `cmd.exe` instead of MSYS, the exit code is **`0x40010006`**. Bash
+was printing the low byte. `0x40010006` is `DBG_PRINTEXCEPTION_C` — the
+exception `OutputDebugString` raises — and a process whose exit code is an
+exception code died of that exception with nothing eligible to handle it. It
+reached no exit door because it was never an exit, and the vectored handler saw
+it every single time and declined it.
 
-### The serial boards speak first, which is why jvs.c has nothing to say
+Swallowing it is not a workaround. It and its wide twin `0x4001000A` exist to
+hand a string to a debugger, there is no debugger, they are informational and
+continuable, and continuing is exactly what `OutputDebugString`'s own `__try`
+does with them — so doing it one frame earlier is the same answer. The
+thread-name exception two lines above in the same handler was already treated
+this way.
 
-`ES3_TRACE_JVS` on this game shows the same two lines for ever:
+**What it was hiding** was three missing instructions, each behind the last:
 
-    [jvs] SetCommTimeouts: interval 600, read 2 x n + 600
-    [jvs] read posted: 3 byte(s) into 09252632, ovl 09249530, routine 00745F40
+    [unlifted] 0x007f3a09: cvtps2pd xmm0, xmm0
+    [unlifted] 0x007a87f4: fpu fldln2
+    [unlifted] 0x007a87f8: fpu fyl2x
 
-A three-byte overlapped read with a completion routine, posted again and again,
-and **not one byte ever written**. The board is expected to talk first. jvs.c is
-a JVS board that answers requests, so it waits, and the game waits, and the
-eighty-second timeout does the rest. Standing in for the one flag each board
-sets is what gets past it; making the runtime initiate is the real fix and is
-not done.
+`fldln2; fxch; fyl2x` is how a compiler builds `log()`. All of them, plus the
+rest of the x87 transcendental set, went upstream into pcrecomp. With them the
+run stops dying, reaches frame 4000, and 1,015,463 of 1,044,480 pixels are lit.
 
-### The chain from "no attract mode" to one null pointer
+**The lesson worth keeping** is about measurement, not about Mario Kart. A
+failure that happens about half the time reads as a coin flip, and four-run
+streaks were repeatedly mistaken for signal here — a JSON field bisect, a
+screenshot flag, a hook — each "confirmed" by three or four runs and each one
+noise. And an exit code truncated to one byte was treated as a real number for
+most of a week. Read the whole value, and count the runs.
 
-The boot finishes and the screen is the operator menu with `<OFFLINE OPERATION>`
-over `PLEASE WAIT`. That is not the boot waiting; it is the boot having decided
-it cannot run networked. Tracing back from it, every link is now known:
+### Where it stops now
+
+Attract mode runs. What has not been done:
 
 | | |
 |---|---|
-| `0x005BF50A` | `[task+0x60] = 3`, the offline state. Nothing moves the task out of it |
-| `0x005BF4D0` | reached only when `[[0x0095A850]] != 0`, the session's "initialised" byte |
-| `0x005BF516` | needs `[[0x0095A850]+0x90] == 0x67`. It reads **0** |
-| `0x00464400` | is what writes that word, from `0x007B3770` - the alAbEx poll. 0x65 is in progress, 0x67 is done, 0x69 is an error. Zero means **the poll never ran** |
-| `0x00463890` | is the poll's caller, and it returns immediately unless `[[0x00959B1C]+3]` and `[[0x0095A850]]` are both set |
-| `0x004636A0` | sets `[[0x0095A850]] = 1` at `0x0046376D`, on a straight line with no failure path - so if it runs to the end, the session is initialised |
-| `0x005BF2C7` | is the gate above all of it: `[[0x00959B1C]+3]` zero skips the whole network step, which is why nothing in this runtime was ever asked about the network. `ES3_POKE=959b1c*+3=1` sets it |
-| `0x00678D30` | then decides, and it is two tests: `[0x00952827] != 0` (it is 1) **and `[0x0095A87C] != 0`** |
-
-`[0x0095A87C]` reads **0**, every run. It is the cabinet-link object - the LAN
-between the cabinets of one bank, not All.Net - and it is never constructed.
-An earlier session had already found its other end: `[[0x95A87C]+4]+0x1C`
-staying negative is what the frame tick reports as `LOCAL NETWORK ERROR`.
-
-So the last thing in the way is a second cabinet. The link worker at
-`0x006770B0` opens a broadcast socket, sends an eight-byte `MK3` discovery
-packet and waits for a peer; with the interface fix it hears its own packet
-back, which is enough to get an address adopted and not enough to build the
-object. Either the runtime stands in for a peer on the wire, or the object has
-to be built with one node in it.
-
-Two things measured on the way that are worth not re-measuring:
-
-**The cabinet-boot path reaches NOW LOADING.** With `959b1c*+3=1` the game gets
-past the operator menu into the real game load - frame 400 is `NOW LOADING`,
-and a surviving run is at frame 1500 and beyond. It also dies with code 6 about
-one run in three, partway through that load, reporting nothing. `tools watch`
-cannot catch it: under a debugger the run never gets that far.
-
-**The death is not the reply.** Answering `getControlData` with `{"status":0}`
-made one run survive where the full reply had died, which looked decisive and
-was not. Four runs each way: the empty reply died two times in four, the full
-reply once in four. Four fields in and four fields out land on either side of
-it at random, which is what bisecting a coin flip looks like.
-`ES3_ALLNET_FIELDS=<n>` is still there for when there is something real to
-bisect.
+| The cabinet-boot byte | `ES3_POKE=959b1c*+3=1` should be a hook with a name, like every other cabinet answer here |
+| The serial boards | Both speak first and neither is emulated: the game posts three-byte overlapped reads on COM1 for ever and never writes one. The drive board and steering are stood in for with flags, not a protocol |
+| Input | The wheel, pedal and coins are the JVS I/O board. `ES3_JVS_SEQ` can press switches on a timetable, and nothing on the operator menu ever answered them — the switches the menu reads come from the USB board, which is answered for existence and not for data |
+| `ES3_TRACE_NET` | Binds four more imports and the boot then stalls early and reproducibly around the I/O board. The listener prints the paths it is asked for instead |
+| The catalog | `catalog.json` is not in the tree and the scan takes half an hour, so the lifted C here came from a fresh scan rather than the one the earlier numbers were measured against |
 
 ### The x87 bug that cost a round
 
