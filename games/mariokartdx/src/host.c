@@ -600,6 +600,32 @@ static int mk_no_update(CPU *c)
 }
 
 /*
+ * Did DirectInput find the controller?
+ *
+ * 0x00740090 has two exits that both return 1, and they mean opposite
+ * things: with no IDirectInput8 at [0x00952CB4] it sets a bit and leaves,
+ * and with one it enumerates DI8DEVCLASS_GAMECTRL. Telling them apart from
+ * outside is impossible and the difference is the whole question, so say
+ * which at the point it is decided.
+ */
+static int mk_dinput_note(CPU *c)
+{
+    static int said;
+    uint32_t di = rd32(0x00952CB4u);
+    (void)c;
+    if (!said) {
+        said = 1;
+        if (di)
+            fprintf(stderr, "[dinput] the game has DirectInput at %08X and is "
+                            "about to enumerate game controllers\n", di);
+        else
+            fprintf(stderr, "[dinput] the game has no DirectInput object, so "
+                            "it will not look for a controller at all\n");
+    }
+    return 0;
+}
+
+/*
  * The PCB startup checklist, as text.
  *
  * 0x005BF900 does not draw anything - it appends one entry to the list the
@@ -1003,6 +1029,27 @@ int main(int argc, char **argv)
     es3_bind_guest(0x00679470u, mk_net_ok);
     es3_bind_guest(0x005BF340u, mk_boot_net_state);
     es3_bind_guest(0x005BF730u, mk_no_update);
+    es3_bind_guest(0x00740090u, mk_dinput_note);
+
+    /*
+     * The controller, which the game asks DirectInput for itself.
+     *
+     * 0x004321F0 calls DirectInput8Create and 0x00740090 enumerates
+     * DI8DEVCLASS_GAMECTRL, sets a DIJOYSTATE2 data format, takes the device
+     * EXCLUSIVE|BACKGROUND on the game's own window and polls it at
+     * 0x007405D0 with GetDeviceState into [obj+0x47C] - buttons at +0x4AC,
+     * tested a byte at a time against 0x80. It is a complete gamepad path and
+     * it is the game's, not a patch DLL's.
+     *
+     * All of it runs. What never ran was the enumeration callback, because
+     * 0x007400DC pushes 0x0073FF60 - a guest address - straight into the real
+     * DINPUT8.dll, which calls it as machine code. Planting a jump to its
+     * thunk at that address is the whole fix; see es3_plant_callback().
+     *
+     * ES3_NO_DINPUT leaves it raw, which is how to watch the enumeration find
+     * a controller and tell nobody.
+     */
+    if (!getenv("ES3_NO_DINPUT")) es3_plant_callback(0x0073FF60u);
 
     guest_init_cpu(&cpu);
     es3_watch_cpu(&cpu);
