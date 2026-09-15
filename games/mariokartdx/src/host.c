@@ -358,6 +358,48 @@ static int mk_cabinet_boot(CPU *c)
 }
 
 /*
+ * The steering potentiometer, which is not wired to anything here.
+ *
+ * E23-01, STEERING VOLUME DEVICE ERROR, and like every other cabinet error it
+ * is a mode whose entry at 0x00871A10 begins with 1 - so filing it stops the
+ * frame loop's task tick and the game draws nothing.
+ *
+ * 0x005BEF80 is the steering task and it has the camera's shape exactly:
+ *
+ *     005BEF8F  cmp dword [edi+0x54], 2      ; the check is complete
+ *     005BEF94  cmp dword [edi+0xad8], 0     ; and the device is fitted
+ *     005BF0E0  cmp dword [edi+0x70], 0x384  ; nine hundred frames
+ *     005BF0E9  cmp dword [edi+0x54], 0      ; nothing decided yet
+ *     005BF0FB  push 0x61                    ; then E23-01
+ *
+ * The sub-state it is waiting on is advanced by 0x005BDCC0, which only says
+ * yes when the drive board has answered - and the drive board never speaks
+ * (see mk_drive_board_connected). So say what is true: the check is complete
+ * and the potentiometer is not fitted. That is the same answer mk_camera_off
+ * gives, through the same two fields, and it leaves the boot with a checklist
+ * line rather than an error that stops everything.
+ *
+ * ES3_STEERING_ON leaves it to the serial port.
+ */
+static int mk_steering_off(CPU *c)
+{
+    static int off = -1, said;
+    if (off < 0) off = getenv("ES3_STEERING_ON") != NULL;
+    if (off || !c->ecx) return 0;
+    if (rd32(c->ecx + 0x54u) != 2u) {
+        wr32(c->ecx + 0x54u, 2u);     /* the check is complete */
+        wr32(c->ecx + 0xAD8u, 0);     /* and the device is not fitted */
+        if (!said) {
+            said = 1;
+            fprintf(stderr, "[wheel] there is no steering potentiometer on "
+                            "this machine; telling the boot the check is done "
+                            "and it is not fitted (ES3_STEERING_ON).\n");
+        }
+    }
+    return 0;                         /* the game's own task still runs */
+}
+
+/*
  * The drive board, which is the other end of a serial cable that is not here.
  *
  * 0x005BEBD0 is the drive-unit task, and it waits the same way the camera did:
@@ -695,6 +737,7 @@ int main(int argc, char **argv)
     es3_bind_guest(0x0073ECF0u, mk_camera_present);
     es3_bind_guest(0x005BEA80u, mk_camera_off);
     es3_bind_guest(0x005BEBD0u, mk_drive_board_connected);
+    es3_bind_guest(0x005BEF80u, mk_steering_off);
     es3_bind_guest(0x004636A0u, mk_cabinet_boot);
     es3_bind_guest(0x007A8590u, mk_io_board_count);
     es3_bind_guest(0x00679470u, mk_net_ok);
