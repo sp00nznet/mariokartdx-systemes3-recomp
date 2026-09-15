@@ -65,7 +65,7 @@ imports    495 functions from 27 DLLs
 | Board imports | **40** — the OKAO Vision camera, entirely by ordinal |
 | Builds | **Yes** — every translation unit to a native executable |
 | Boots | **Yes, all the way through.** The JVS-injection entry stub, the CRT, every C++ static initialiser, a twenty-thread worker pool, a real `mkart3` window, Direct3D 10 and a DXGI swap chain, DirectInput 8 — and then the cabinet's own startup: drive unit, I/O board, NAMCAM, steering, IC card reader, local network, ALL.Net authentication. **No error filed in any of the five slots** |
-| Renders | **Attract mode, in full 3D.** 1360x768, 1,015,463 of 1,044,480 pixels lit, the course and karts and characters drawn and animating, the clock counting down |
+| Renders | **Attract mode, in full 3D — but not yet reliably.** 1360x768, 1,015,463 of 1,044,480 pixels lit, the course and karts and characters drawn and animating, the clock counting down. Measured since: about **one run in five** gets there. The rest blip out partway through the self-check and drop to the operator menu, or quit cleanly with exit 0. That intermittency is the top of the list, and the screenshot above is a real frame from a real run, not a representative one |
 | Plays | Not yet. Attract mode is a demo the game drives itself; the wheel, pedal and coin path is the JVS I/O board, and nothing has been asked of it in anger |
 
 ### The hard part is not the CPU

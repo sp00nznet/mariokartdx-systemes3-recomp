@@ -429,8 +429,18 @@ static int mk_steering_off(CPU *c)
     if (off < 0) off = getenv("ES3_STEERING_ON") != NULL;
     if (off || !c->ecx) return 0;
     if (rd32(c->ecx + 0x54u) != 2u) {
+        /* Complete, and PRESENT - not "not fitted".
+         *
+         * [this+0xAD8] zero takes 0x005BEFE0, which renders the string at
+         * 0x0088AC20: "OFF". A cabinet that reports its wheel as absent is a
+         * cabinet nobody can play, and the boot draws a crossed-out steering
+         * wheel in the corner to say so. Above zero takes 0x005BEFA4 instead,
+         * which renders 0x0088ABEC - "OK" - as long as [[0x00959B38]+0x1A0] is
+         * zero, and it is measured zero here. ES3_STEERING_OFF goes back to
+         * OFF for comparison. */
         wr32(c->ecx + 0x54u, 2u);     /* the check is complete */
-        wr32(c->ecx + 0xAD8u, 0);     /* and the device is not fitted */
+        wr32(c->ecx + 0xAD8u,
+             getenv("ES3_STEERING_OFF") ? 0u : 1u);
         if (!said) {
             said = 1;
             fprintf(stderr, "[wheel] there is no steering potentiometer on "
