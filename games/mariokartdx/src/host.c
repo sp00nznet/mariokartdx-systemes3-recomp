@@ -482,6 +482,15 @@ static int mk_card_vendor_done(CPU *c)
     if (rd32(c->ecx + 0x58u) != 2u) {
         wr32(c->ecx + 0x58u, 2u);     /* the check is complete */
         wr32(c->ecx + 0xAD8u, 1u);    /* and the vendor is there */
+        /* And hand on to the next step, which this shortcut would otherwise
+         * strand. 0x005BF120 only writes [+0x5C] on the path it takes when
+         * [+0x58] is not yet 2 (at 0x005BF17A and 0x005BF1D4); setting 0x58
+         * here means it takes the "already done" branch instead and the
+         * vendor R/W step after it never leaves whatever state it started
+         * in. That is one whole row of the checklist, and the boot sits on
+         * it for ever. */
+        wr32(c->ecx + 0x5Cu, 1u);     /* ask the vendor R/W step */
+        wr32(c->ecx + 0x70u, 0u);     /* with its timeout counter reset */
         if (!said) {
             said = 1;
             fprintf(stderr, "[card] the IC card vendor is on a serial port "
@@ -490,6 +499,104 @@ static int mk_card_vendor_done(CPU *c)
         }
     }
     return 0;                         /* the game's own task still runs */
+}
+
+/*
+ * IC CARD VENDOR R/W CHECK, the row the boot actually sits on.
+ *
+ * 0x005BF220 is that step, and it is a three-state machine on [this+0x5C]:
+ * 1 is "ask", 2 is "done", 3 is "in progress" - and 3 draws its row inline
+ * instead of calling 0x005BF900, which is why the trace above never showed
+ * y=442 and I spent a while believing the row was missing. It is not
+ * missing. It says PROGRESS for ever.
+ *
+ * The ask, at 0x005BF2D3, is 0x00678D30: "is the vendor link up?" It is true
+ * only when [0x00952827] and [0x0095A87C] are both set, and 0x0095A87C is the
+ * AMNet session handle, which nothing here ever hands out. So the step falls
+ * through to 0x006789E0, which opens a socket to a vendor that does not
+ * exist, returns 0, and latches state 3.
+ *
+ * 0x00678D30 has exactly one caller - this check - so answering it is the
+ * whole fix, and it costs the network phase nothing: state 1 then takes the
+ * 0x005BF320 path, which is the same "done" the real cabinet reaches.
+ */
+static int mk_vendor_link_up(CPU *c)
+{
+    static int off = -1;
+    if (off < 0) off = getenv("ES3_NO_CARD_VENDOR") != NULL;
+    if (off) return 0;
+    c->eax = 1u;                      /* the vendor link is up */
+    c->esp += 4;                      /* consume the return address */
+    return 1;
+}
+
+/*
+ * UPDATE CHECK, the last row, and the last thing between here and the game.
+ *
+ * 0x005BF730 is a state machine on [this+0x68] like the vendor step, and its
+ * state 2 is "an update is downloading" - drawn inline at y=0x256, left for
+ * the updater thread to finish, and on a board with no update server that
+ * thread never does. It enters state 2 from state 1 at 0x005BF7DF, on
+ * [[0x00959B38]+0x190]: an update is pending.
+ *
+ * Nothing here can serve one, so the answer is no. With the byte clear the
+ * step takes 0x005BF80D instead, asks 0x00679470 - which this file already
+ * answers - and writes state 3, complete.
+ *
+ * The byte is clear when the vendor step reads it at 0x005BF2E1 and set by
+ * the time this one does, so it is the network phase that sets it, which is
+ * the phase this port only reached once the vendor row stopped stalling.
+ *
+ * ES3_UPDATE_WAIT leaves it alone, which is how to watch the boot sit on
+ * PROGRESS here again.
+ */
+static int mk_no_update(CPU *c)
+{
+    static int off = -1, said;
+    uint32_t sys;
+
+    (void)c;
+    if (off < 0) off = getenv("ES3_UPDATE_WAIT") != NULL;
+    if (off) return 0;
+    sys = rd32(0x00959B38u);
+    if (sys && rd8(sys + 0x190u)) wr8(sys + 0x190u, 0);
+
+    /*
+     * And the download itself, which is the route this boot actually takes.
+     *
+     * With no update pending the step goes to 0x005BF80D, asks 0x00679470 -
+     * which says the network is fine, because this file made it fine - and
+     * arrives at 0x005BF84F, the real update logic. There it reads one slot
+     * of the download table, [[[0x00959B60]+8]+0x48], and:
+     *
+     *     005BF85A  cmp dword ptr [edx + 0xc], 6
+     *     005BF85E  je  0x5bf8b6            ; finished: the check completes
+     *     005BF865  call 0x663980           ; else: has it timed out?
+     *     005BF887  mov dword ptr [esi + 0x68], 2   ; no: start downloading
+     *
+     * State 2 draws PROGRESS inline and waits for a download from a server
+     * that is a hundred lines of C in allnet.c. 6 is the game's own value for
+     * a slot that has finished, so say the slot has finished - which is true:
+     * there is no update to fetch and nothing is going to arrive.
+     *
+     * Only while this step is still asking ([this+0x68] == 1), so the field is
+     * not held down over whatever the downloader does with it afterwards.
+     */
+    if (c->ecx && rd32(c->ecx + 0x68u) == 1u) {
+        uint32_t tbl = rd32(0x00959B60u);
+        uint32_t slot = tbl ? rd32(rd32(tbl + 8u) + 0x48u) : 0;
+        if (slot && rd32(slot + 0xCu) != 6u) {
+            wr32(slot + 0xCu, 6u);
+            if (!said) {
+                said = 1;
+                fprintf(stderr, "[upd] the boot is about to download an "
+                                "update from a server that is not there; "
+                                "saying the download is finished, which it "
+                                "is (ES3_UPDATE_WAIT).\n");
+            }
+        }
+    }
+    return 0;                         /* the game's own step still runs */
 }
 
 /*
@@ -886,9 +993,16 @@ int main(int argc, char **argv)
     es3_bind_guest(0x006A5140u, mk_attract_note);
     es3_bind_guest(0x005C4A80u, mk_attract_load);
     es3_bind_guest(0x004636A0u, mk_cabinet_boot);
+    /* And 0x005BF220, the vendor R/W check, which reads the same byte at
+     * 0x005BF2CD and skips the whole network phase when it is zero. ES3_POKE
+     * was setting the byte at ten hertz and losing the race, which is the
+     * mistake this file already has a paragraph about. */
+    es3_bind_guest(0x005BF220u, mk_cabinet_boot);
+    es3_bind_guest(0x00678D30u, mk_vendor_link_up);
     es3_bind_guest(0x007A8590u, mk_io_board_count);
     es3_bind_guest(0x00679470u, mk_net_ok);
     es3_bind_guest(0x005BF340u, mk_boot_net_state);
+    es3_bind_guest(0x005BF730u, mk_no_update);
 
     guest_init_cpu(&cpu);
     es3_watch_cpu(&cpu);
