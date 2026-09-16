@@ -600,6 +600,59 @@ static int mk_no_update(CPU *c)
 }
 
 /*
+ * Free play, because there is no coin slot on a desk.
+ *
+ * 0x00667B50 walks the cabinet's settings and names every one of them, which
+ * is how the layout is known at all - it pairs a member with a string, in
+ * order: +0xEC card_charge, +0xF0 game_charge, +0xF4 continue_charge,
+ * +0xF8 freeplay_setup, +0xFC icrw_setup, and on through the bookkeeping
+ * (+0x174 coin_num, +0x178 service_switch_num) to the play-count histogram.
+ *
+ * `this` for that walk is the sub-object the settings' second vtable sits on,
+ * so freeplay_setup is [ecx+0xF8] with no global to find and no arithmetic to
+ * get wrong.
+ *
+ * In memory only. The operator's settings live in a file in the game tree and
+ * this never writes one - ES3_FREEPLAY=0 turns it off and the cabinet's own
+ * setting stands.
+ */
+static int mk_free_play(CPU *c)
+{
+    static int off = -1, said;
+    uint32_t wrap, owner, cfg;
+    const char *e;
+
+    (void)c;
+    if (off < 0) { e = getenv("ES3_FREEPLAY"); off = e && *e == '0'; }
+    if (off) return 0;
+
+    /* [0x00959B60] is the wrapper, +8 its owner, +0x90..+0x9C the four
+     * settings objects, and the serialiser's `this` is the second base at
+     * +0xA0 - so freeplay_setup is +0xA0 + 0xF8 = +0x198 from the object. */
+    wrap = rd32(0x00959B60u);
+    if (!wrap) return 0;
+    owner = rd32(wrap + 8u);
+    if (!owner) return 0;
+    cfg = rd32(owner + 0x90u);
+    if (!cfg) return 0;
+
+    if (rd32(cfg + 0x198u) != 1u) {
+        if (!said) {
+            said = 1;
+            fprintf(stderr, "[coin] cabinet settings at %08X: game_charge %u, "
+                            "continue_charge %u, freeplay %u.\n", cfg,
+                    rd32(cfg + 0x190u), rd32(cfg + 0x194u),
+                    rd32(cfg + 0x198u));
+            fprintf(stderr, "[coin] there is no coin slot on a desk; turning "
+                            "freeplay_setup on, in memory "
+                            "(ES3_FREEPLAY=0 to leave it alone).\n");
+        }
+        wr32(cfg + 0x198u, 1u);
+    }
+    return 0;
+}
+
+/*
  * Did DirectInput find the controller?
  *
  * 0x00740090 has two exits that both return 1, and they mean opposite
@@ -1030,6 +1083,7 @@ int main(int argc, char **argv)
     es3_bind_guest(0x005BF340u, mk_boot_net_state);
     es3_bind_guest(0x005BF730u, mk_no_update);
     es3_bind_guest(0x00740090u, mk_dinput_note);
+    es3_bind_guest(0x005C38B0u, mk_free_play);
 
     /*
      * The controller, which the game asks DirectInput for itself.
