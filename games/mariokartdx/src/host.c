@@ -867,6 +867,24 @@ static int mk_input_trace(CPU *c)
         }
     }
 
+    {   /* The layer above: [[0x00959B54]+4]+0x44 is what the game tests for
+         * its own actions (0x20 and 0x40 are two of them). Printing it beside
+         * the raw press is the bridge between "a button arrived" and "the
+         * game did something". */
+        static uint32_t last_act = 0xFFFFFFFFu;
+        uint32_t sing = rd32(0x00959B54u), act;
+        if (sing) {
+            uint32_t mgr2 = rd32(sing + 4u);
+            if (mgr2) {
+                act = rd32(mgr2 + 0x44u);
+                if (act != last_act) {
+                    fprintf(stderr, "[in] action word %08X\n", act);
+                    last_act = act;
+                }
+            }
+        }
+    }
+
     for (k = 0; k < n; k++) {
         uint32_t rec = base + k * 0x780u, btn = rd32(rec + 0x5A0u);
         int i, moved = 0;
@@ -887,6 +905,22 @@ static int mk_input_trace(CPU *c)
             }
         }
         if (btn != last_btn[k]) {
+            /* Bits above the ten a pad really has are synthesised by the poll
+             * from combinations, and they are the cabinet switches a pad does
+             * not have: 0x1000 Back+Start, 0x2000 Back+RB, 0x4000 Back alone,
+             * 0x8000 Back+B, 0x10000 Back+X, 0x20000 Back+Y, 0x40000 Back+LB,
+             * 0x80000 R3+L3. Say so, because that is the whole point. */
+            static const struct { uint32_t bit; const char *how; } COMBO[] = {
+                { 0x1000u,  "Back+Start" }, { 0x2000u,  "Back+RB" },
+                { 0x4000u,  "Back" },       { 0x8000u,  "Back+B" },
+                { 0x10000u, "Back+X" },     { 0x20000u, "Back+Y" },
+                { 0x40000u, "Back+LB" },    { 0x80000u, "R3+L3" },
+            };
+            size_t q;
+            for (q = 0; q < sizeof COMBO / sizeof COMBO[0]; q++)
+                if ((btn & COMBO[q].bit) && !(last_btn[k] & COMBO[q].bit))
+                    fprintf(stderr, "[in] *** %s -> synthesised bit %X ***\n",
+                            COMBO[q].how, COMBO[q].bit);
             fprintf(stderr, "[in] dev%u buttons %08X", k, btn);
             for (i = 0; i < 32; i++)
                 if (btn & (1u << i)) fprintf(stderr, " b%d", i);
