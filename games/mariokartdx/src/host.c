@@ -631,6 +631,57 @@ static int mk_no_update(CPU *c)
  */
 
 /*
+ * Credits, because a coin arrives on a switch this port does not have.
+ *
+ * Free play looked like the answer and is not reachable from here: the
+ * operator settings are a file the game never opens on a boot (only COM4 and
+ * assets are, with ES3_TRACE_FILES on), so it runs on defaults and editing
+ * that file changes nothing.
+ *
+ * The gate itself is plain, in the task that calls itself "CreditChk.":
+ *
+ *     006A546C  mov edx, [ecx + 0x1c]   ; ecx = [[0x00959B38]+4], credits held
+ *     006A547C  mov ecx, [esi + 8]      ; esi = [0x00959B38], credits needed
+ *     006A54C4  cmp dword ptr [ebp - 0x10], eax
+ *     006A54C7  jae 0x6a54f0            ; enough of them: get on with it
+ *
+ * So hold the count at what the game is asking for. This is the coin slot,
+ * answered where the question is asked, and it is the same shape as every
+ * other stand-in in this file.
+ *
+ * ES3_NO_CREDITS leaves the counter alone, and then the cabinet wants coins
+ * from a switch that is not wired to anything.
+ */
+static int mk_credits(CPU *c)
+{
+    static int off = -1, said;
+    uint32_t sys, credit, want, have;
+
+    (void)c;
+    if (off < 0) off = getenv("ES3_NO_CREDITS") != NULL;
+    if (off) return 0;
+
+    sys = rd32(0x00959B38u);
+    if (!sys) return 0;
+    credit = rd32(sys + 4u);
+    if (!credit) return 0;
+
+    want = rd32(sys + 8u);
+    have = rd32(credit + 0x1Cu);
+    if (want == 0 || want > 99u) return 0;   /* not a credit count yet */
+    if (have < want) {
+        wr32(credit + 0x1Cu, want);
+        if (!said) {
+            said = 1;
+            fprintf(stderr, "[coin] the cabinet wants %u credit(s) and the "
+                            "coin switch is not wired to anything; giving it "
+                            "%u (ES3_NO_CREDITS to stop).\n", want, want);
+        }
+    }
+    return 0;
+}
+
+/*
  * Did DirectInput find the controller?
  *
  * 0x00740090 has two exits that both return 1, and they mean opposite
@@ -1061,6 +1112,7 @@ int main(int argc, char **argv)
     es3_bind_guest(0x005BF340u, mk_boot_net_state);
     es3_bind_guest(0x005BF730u, mk_no_update);
     es3_bind_guest(0x00740090u, mk_dinput_note);
+    es3_bind_guest(0x005C38B0u, mk_credits);
 
     /*
      * The controller, which the game asks DirectInput for itself.
