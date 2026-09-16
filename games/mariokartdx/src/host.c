@@ -751,6 +751,71 @@ static int mk_one_cabinet(CPU *c)
 }
 
 /*
+ * The pad is the wheel, as far as the name check is concerned.
+ *
+ * The game does not take just any game controller as its steering. Having
+ * enumerated one, it compares the product name against a single string and
+ * only the device that matches becomes the wheel:
+ *
+ *     007403FE  push 0x8da278       ; "Immersion TouchSense Steering Wheel (USB HID)"
+ *     00740403  mov  edi, 0x2d      ; all 45 characters of it
+ *     0074040B  call 0x467e20       ; compare
+ *     00740418  mov  byte [ebp-0x45], 0   ; different: not the wheel
+ *     00740440  cmp  byte [ebp-0x45], 0
+ *     00740444  je   0x740451             ; not the wheel: skip it
+ *     0074044B  mov  byte [esi+0x10], 1   ; the wheel, and this is it
+ *     0074044F  mov  dword ptr [esi], edx
+ *
+ * That is the cabinet's wheel, an Immersion force-feedback unit. An Xbox pad
+ * enumerates perfectly well and fails this by name, which is exactly the
+ * symptom: the buttons work, because those come from the generic pad path,
+ * and steering has no source at all because no device was ever chosen as the
+ * wheel.
+ *
+ * The callback runs through the thunk planted at 0x0073FF60, so its argument
+ * is reachable here: a DIDEVICEINSTANCEW, whose tszProductName is at +560 -
+ * dwSize 4, two GUIDs 32, dwDevType 4, then tszInstanceName[260] at 40 and
+ * tszProductName[260] at 560, 1100 bytes in all, which is the 0x113 dwords
+ * the game copies at 0x0074133E.
+ *
+ * So give the name the game is looking for to the device it is looking at.
+ * Only when it does not already match, so a real Immersion wheel is left
+ * alone, and only to the first device, so a second pad does not become a
+ * second wheel.
+ *
+ * ES3_NO_WHEEL_NAME leaves the name alone, and then nothing is the wheel.
+ */
+static int mk_pad_is_the_wheel(CPU *c)
+{
+    static const wchar_t want[] = L"Immersion TouchSense Steering Wheel (USB HID)";
+    static int off = -1, done;
+    uint32_t ddi, name;
+
+    if (off < 0) off = getenv("ES3_NO_WHEEL_NAME") != NULL;
+    if (off || done) return 0;
+
+    ddi = rd32(c->esp + 4u);          /* LPCDIDEVICEINSTANCEW */
+    if (!ddi) return 0;
+    name = ddi + 560u;
+
+    if (wcscmp((const wchar_t *)(uintptr_t)name, want) == 0) {
+        done = 1;
+        fprintf(stderr, "[wheel] the cabinet's own steering wheel is here; "
+                        "leaving its name alone.\n");
+        return 0;
+    }
+
+    fprintf(stderr, "[wheel] DirectInput offers \"%ls\", and the game only "
+                    "accepts a device called\n"
+                    "        \"%ls\" as its steering. Calling it that "
+                    "(ES3_NO_WHEEL_NAME to stop).\n",
+            (const wchar_t *)(uintptr_t)name, want);
+    memcpy((void *)(uintptr_t)name, want, sizeof want);
+    done = 1;
+    return 0;                         /* the game's own callback still runs */
+}
+
+/*
  * Did DirectInput find the controller?
  *
  * 0x00740090 has two exits that both return 1, and they mean opposite
@@ -1181,6 +1246,7 @@ int main(int argc, char **argv)
     es3_bind_guest(0x005BF340u, mk_boot_net_state);
     es3_bind_guest(0x005BF730u, mk_no_update);
     es3_bind_guest(0x00740090u, mk_dinput_note);
+    es3_bind_guest(0x0073FF60u, mk_pad_is_the_wheel);
     es3_bind_guest(0x005C38B0u, mk_credits);
     es3_bind_guest(0x00676A20u, mk_one_cabinet);
 
