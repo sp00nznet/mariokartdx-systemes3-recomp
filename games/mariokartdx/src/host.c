@@ -600,57 +600,35 @@ static int mk_no_update(CPU *c)
 }
 
 /*
- * Free play, because there is no coin slot on a desk.
+ * Free play lives in a file, not in this process.
  *
- * 0x00667B50 walks the cabinet's settings and names every one of them, which
- * is how the layout is known at all - it pairs a member with a string, in
- * order: +0xEC card_charge, +0xF0 game_charge, +0xF4 continue_charge,
- * +0xF8 freeplay_setup, +0xFC icrw_setup, and on through the bookkeeping
- * (+0x174 coin_num, +0x178 service_switch_num) to the play-count histogram.
+ * The cabinet's operator settings are sv/TestMode/testmode_<unixtime>.bin in
+ * the game tree, 168 bytes, and the layout is readable because 0x00667B50
+ * names every field as it walks them: +0xE8 language, +0xEC card_charge,
+ * +0xF0 game_charge, +0xF4 continue_charge, +0xF8 freeplay_setup, +0xFC
+ * icrw_setup, +0x100 icvender_setup, +0x104 steer_setup, the two namcam
+ * settings, three analog calibrations, two volumes, then +0x128..+0x144
+ * monday..everyday, and on to +0x174 coin_num and +0x178
+ * service_switch_num.
  *
- * `this` for that walk is the sub-object the settings' second vtable sits on,
- * so freeplay_setup is [ecx+0xF8] with no global to find and no arithmetic to
- * get wrong.
+ * In the file those are little-endian dwords starting at offset 2, in that
+ * same order, so freeplay_setup is entry 7 at offset 0x1E. The alignment is
+ * not a guess: entry 19..26 are eight copies of 1440 - minutes in a day, the
+ * weekly closing times - and entry 30 and 31 are C0A80000 and FFFFFF00, an
+ * address and a netmask.
  *
- * In memory only. The operator's settings live in a file in the game tree and
- * this never writes one - ES3_FREEPLAY=0 turns it off and the cabinet's own
- * setting stands.
+ * Bytes 0..1 are CRC-16/ARC over bytes[2:-2] and the last two bytes are its
+ * one's complement, which is why editing the file needs the checksum redone:
+ * D625 and 29DA sum to FFFF on the original.
+ *
+ * Nothing here does that. An earlier version of this file resolved the
+ * settings through the singleton at [0x00959B60] and wrote freeplay_setup
+ * once a frame, and it was writing to four objects that hold nothing - every
+ * field of all four reads zero at any point in a boot, so they are not what
+ * the game consults. The settings the game uses come from that file, and the
+ * honest way to change an operator setting is to change the operator's
+ * setting.
  */
-static int mk_free_play(CPU *c)
-{
-    static int off = -1, said;
-    uint32_t wrap, owner, cfg;
-    const char *e;
-
-    (void)c;
-    if (off < 0) { e = getenv("ES3_FREEPLAY"); off = e && *e == '0'; }
-    if (off) return 0;
-
-    /* [0x00959B60] is the wrapper, +8 its owner, +0x90..+0x9C the four
-     * settings objects, and the serialiser's `this` is the second base at
-     * +0xA0 - so freeplay_setup is +0xA0 + 0xF8 = +0x198 from the object. */
-    wrap = rd32(0x00959B60u);
-    if (!wrap) return 0;
-    owner = rd32(wrap + 8u);
-    if (!owner) return 0;
-    cfg = rd32(owner + 0x90u);
-    if (!cfg) return 0;
-
-    if (rd32(cfg + 0x198u) != 1u) {
-        if (!said) {
-            said = 1;
-            fprintf(stderr, "[coin] cabinet settings at %08X: game_charge %u, "
-                            "continue_charge %u, freeplay %u.\n", cfg,
-                    rd32(cfg + 0x190u), rd32(cfg + 0x194u),
-                    rd32(cfg + 0x198u));
-            fprintf(stderr, "[coin] there is no coin slot on a desk; turning "
-                            "freeplay_setup on, in memory "
-                            "(ES3_FREEPLAY=0 to leave it alone).\n");
-        }
-        wr32(cfg + 0x198u, 1u);
-    }
-    return 0;
-}
 
 /*
  * Did DirectInput find the controller?
@@ -1083,7 +1061,6 @@ int main(int argc, char **argv)
     es3_bind_guest(0x005BF340u, mk_boot_net_state);
     es3_bind_guest(0x005BF730u, mk_no_update);
     es3_bind_guest(0x00740090u, mk_dinput_note);
-    es3_bind_guest(0x005C38B0u, mk_free_play);
 
     /*
      * The controller, which the game asks DirectInput for itself.
