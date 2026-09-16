@@ -298,7 +298,27 @@ static int mk_camera_off(CPU *c)
 static int mk_camera_present(CPU *c)
 {
     static int off = -1, said;
-    if (off < 0) off = getenv("ES3_NO_CAMERA") != NULL;
+    /*
+     * Off unless asked for, because claiming a camera that is not there is
+     * worse than having none.
+     *
+     * The object at [0x00959B4C] is eight bytes built as { interface = NULL,
+     * present = 0 } at 0x006AAD7F. The real 0x0073ECF0 builds a capture graph
+     * and sets BOTH. This only ever set the present byte, so the game was
+     * told a camera existed and handed a null interface to reach it with -
+     * and it believed the byte. The first time anything asked, on the frame a
+     * game actually starts, it faulted in 0x0069EB20.
+     *
+     * It also contradicted mk_camera_off(), which tells the boot the camera
+     * is not fitted. Two stand-ins for one piece of hardware, disagreeing.
+     *
+     * Letting the real function run is the honest answer and the working one:
+     * it looks for a camera, does not find one, and leaves present = 0, which
+     * is a state the game has a checklist line for and handles everywhere.
+     * With this off a race starts and ends cleanly; with it on the process
+     * died every time credits were satisfied.
+     */
+    if (off < 0) off = getenv("ES3_CAMERA_PRESENT") == NULL;
     if (off || !c->eax) return 0;
     if (!said) {
         said = 1;
