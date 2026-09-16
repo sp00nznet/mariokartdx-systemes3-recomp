@@ -816,6 +816,93 @@ static int mk_pad_is_the_wheel(CPU *c)
 }
 
 /*
+ * ES3_TRACE_INPUT: what the game sees when you press something.
+ *
+ * "Did Start do that, or did the item button advance it anyway" is not
+ * answerable by pressing buttons and watching the screen, and it is the
+ * question that matters for mapping a pad onto a cabinet that has only
+ * SELECT UP/DOWN, ENTER, ITEM and MARIO.
+ *
+ * 0x00740590 polls one DirectInput device per call. Its argument is the
+ * input manager; [mgr+4] is the device array, the records are 0x780 apart,
+ * and within one record the poll leaves:
+ *
+ *     +0x47C  DIJOYSTATE2 as GetDeviceState filled it (0x110 bytes)
+ *     +0x4AC  rgbButtons, one byte each, 0x80 when down
+ *     +0x59C  how many buttons this device has
+ *     +0x5A0  a bitmask the poll rebuilds, bit k set for button k
+ *
+ * So print the mask and the six axes whenever they change. Press one button
+ * at a time and the log names its bit; move one stick and the log names the
+ * axis and its range. That is the mapping, measured rather than guessed.
+ */
+static int mk_input_trace(CPU *c)
+{
+    static int off = -1, said;
+    static uint32_t last_btn[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu,
+                                    0xFFFFFFFFu, 0xFFFFFFFFu };
+    static int32_t last_ax[4][6];
+    static uint32_t last_pov[4] = { 0, 0, 0, 0 };
+    uint32_t mgr, base, n, k;
+
+    if (off < 0) off = getenv("ES3_TRACE_INPUT") == NULL;
+    if (off) return 0;
+
+    mgr = rd32(c->esp + 4u);          /* the return address is at [esp] */
+    if (!mgr) return 0;
+    base = rd32(mgr + 4u);
+    n = rd32(mgr + 8u);
+    if (!base || n > 4u) return 0;
+
+    if (!said) {
+        said = 1;
+        fprintf(stderr, "[in] manager %08X, %u device(s) at %08X, "
+                        "records 0x780 apart\n", mgr, n, base);
+        for (k = 0; k < n; k++) {
+            uint32_t rec = base + k * 0x780u;
+            fprintf(stderr, "[in]   device %u: iface %08X state %u "
+                            "buttons %u axes %u\n", k,
+                    rd32(rec + 0x44Cu), rd32(rec + 0x590u),
+                    rd32(rec + 0x59Cu), rd32(rec + 0x598u));
+        }
+    }
+
+    for (k = 0; k < n; k++) {
+        uint32_t rec = base + k * 0x780u, btn = rd32(rec + 0x5A0u);
+        int i, moved = 0;
+        int32_t ax[6];
+        for (i = 0; i < 6; i++) {
+            ax[i] = (int32_t)rd32(rec + 0x47Cu + 4u * (uint32_t)i);
+            if (ax[i] - last_ax[k][i] > 3000 || last_ax[k][i] - ax[i] > 3000)
+                moved = 1;
+        }
+        {   /* rgdwPOV is DIJOYSTATE2 + 0x20: six axes, two sliders, then
+             * four hats. An Xbox d-pad arrives here, not in the buttons,
+             * which is why a d-pad can do nothing while buttons work. */
+            uint32_t pov = rd32(rec + 0x47Cu + 0x20u);
+            if (pov != last_pov[k]) {
+                fprintf(stderr, "[in] dev%u pov %08X (%s)\n", k, pov,
+                        pov == 0xFFFFFFFFu ? "centred" : "pushed");
+                last_pov[k] = pov;
+            }
+        }
+        if (btn != last_btn[k]) {
+            fprintf(stderr, "[in] dev%u buttons %08X", k, btn);
+            for (i = 0; i < 32; i++)
+                if (btn & (1u << i)) fprintf(stderr, " b%d", i);
+            fprintf(stderr, "\n");
+            last_btn[k] = btn;
+        }
+        if (moved) {
+            fprintf(stderr, "[in] dev%u axes X=%d Y=%d Z=%d Rx=%d Ry=%d Rz=%d\n",
+                    k, ax[0], ax[1], ax[2], ax[3], ax[4], ax[5]);
+            for (i = 0; i < 6; i++) last_ax[k][i] = ax[i];
+        }
+    }
+    return 0;
+}
+
+/*
  * Did DirectInput find the controller?
  *
  * 0x00740090 has two exits that both return 1, and they mean opposite
@@ -1247,6 +1334,7 @@ int main(int argc, char **argv)
     es3_bind_guest(0x005BF730u, mk_no_update);
     es3_bind_guest(0x00740090u, mk_dinput_note);
     es3_bind_guest(0x0073FF60u, mk_pad_is_the_wheel);
+    es3_bind_guest(0x00740590u, mk_input_trace);
     es3_bind_guest(0x005C38B0u, mk_credits);
     es3_bind_guest(0x00676A20u, mk_one_cabinet);
 
