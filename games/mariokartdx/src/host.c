@@ -631,54 +631,103 @@ static int mk_no_update(CPU *c)
  */
 
 /*
- * Credits, because a coin arrives on a switch this port does not have.
+ * A coin, when you press one in.
  *
- * Free play looked like the answer and is not reachable from here: the
- * operator settings are a file the game never opens on a boot (only COM4 and
- * assets are, with ES3_TRACE_FILES on), so it runs on defaults and editing
- * that file changes nothing.
+ * The first version of this pinned the credit count at whatever the game was
+ * asking for, every frame. It worked - CREDIT(S) went 00/02 to 02/02 - and it
+ * is not a coin slot: the count never goes down, so the game can never spend
+ * a credit, and an attract loop with credits permanently available is a
+ * cabinet that is always mid-transaction. Runs with it pinned crashed; runs
+ * with ES3_NO_CREDITS exited cleanly.
  *
- * The gate itself is plain, in the task that calls itself "CreditChk.":
+ * So take the coin edge the runtime already has - keyboard 5, or either
+ * stick click on a pad - and add one credit per press, the way a coin
+ * mechanism does. The counters are the ones the task that calls itself
+ * "CreditChk." compares:
  *
  *     006A546C  mov edx, [ecx + 0x1c]   ; ecx = [[0x00959B38]+4], credits held
  *     006A547C  mov ecx, [esi + 8]      ; esi = [0x00959B38], credits needed
  *     006A54C4  cmp dword ptr [ebp - 0x10], eax
  *     006A54C7  jae 0x6a54f0            ; enough of them: get on with it
  *
- * So hold the count at what the game is asking for. This is the coin slot,
- * answered where the question is asked, and it is the same shape as every
- * other stand-in in this file.
+ * The game does the deciding and the spending; this only puts coins in.
  *
- * ES3_NO_CREDITS leaves the counter alone, and then the cabinet wants coins
- * from a switch that is not wired to anything.
+ * ES3_FREE_CREDITS=n starts the cabinet with n credits already in it, for
+ * getting to a screen quickly without reaching for the pad.
  */
 static int mk_credits(CPU *c)
 {
-    static int off = -1, said;
-    uint32_t sys, credit, want, have;
+    static int started;
+    uint32_t sys, credit, have;
+    unsigned coins;
 
     (void)c;
-    if (off < 0) off = getenv("ES3_NO_CREDITS") != NULL;
-    if (off) return 0;
-
     sys = rd32(0x00959B38u);
     if (!sys) return 0;
     credit = rd32(sys + 4u);
     if (!credit) return 0;
 
-    want = rd32(sys + 8u);
-    have = rd32(credit + 0x1Cu);
-    if (want == 0 || want > 99u) return 0;   /* not a credit count yet */
-    if (have < want) {
-        wr32(credit + 0x1Cu, want);
-        if (!said) {
-            said = 1;
-            fprintf(stderr, "[coin] the cabinet wants %u credit(s) and the "
-                            "coin switch is not wired to anything; giving it "
-                            "%u (ES3_NO_CREDITS to stop).\n", want, want);
-        }
+    coins = es3_coin_take();
+
+    if (!started) {
+        const char *e = getenv("ES3_FREE_CREDITS");
+        started = 1;
+        if (e) coins += (unsigned)atoi(e);
+        fprintf(stderr, "[coin] the cabinet wants %u credit(s) per play. The "
+                        "coin slot is the 5 key, or a click of either stick "
+                        "on a pad (ES3_FREE_CREDITS=n to start with some).\n",
+                rd32(sys + 8u));
+    }
+
+    if (coins) {
+        have = rd32(credit + 0x1Cu) + coins;
+        if (have > 99u) have = 99u;
+        wr32(credit + 0x1Cu, have);
+        fprintf(stderr, "[coin] %u coin(s) in; the cabinet now holds %u "
+                        "credit(s) and wants %u.\n",
+                coins, have, rd32(sys + 8u));
     }
     return 0;
+}
+
+/*
+ * One cabinet, and it is this one.
+ *
+ * Mario Kart DX banks up to four cabinets on a LAN. 0x00676A20 answers how
+ * many of them are talking: it walks the four peer slots at [this+0x12194]
+ * and counts those whose [+0xC] and [+0xD] are both set. On a desk nothing
+ * ever sets them, so the answer is zero - and zero is not the same as one:
+ *
+ *     0067618C  call 0x676a20
+ *     00676191  cmp  eax, 1
+ *     00676197  jne  0x6761a2       ; not one: wait, and time out at 60
+ *     00676199  mov  byte [eax+0x103], 1   ; exactly one: get on with it
+ *
+ * The game already knows how to be a single cabinet. It just has to be told
+ * it is one, and one is the true answer here: a standalone cabinet counts
+ * itself and nobody else. Zero is the answer of a cabinet that cannot even
+ * see its own link.
+ *
+ * Its other two callers draw the operator overlay that prints
+ * "number of drive cabinets communicating <%d>", which will now say 1.
+ *
+ * ES3_NO_CABINET_LINK hands the question back, and then the count is zero
+ * and every race waits out the timeout first.
+ */
+static int mk_one_cabinet(CPU *c)
+{
+    static int off = -1, said;
+    if (off < 0) off = getenv("ES3_NO_CABINET_LINK") != NULL;
+    if (off) return 0;
+    if (!said) {
+        said = 1;
+        fprintf(stderr, "[link] the game asked how many drive cabinets are "
+                        "talking; saying one, which is this one "
+                        "(ES3_NO_CABINET_LINK to answer honestly with none).\n");
+    }
+    c->eax = 1;
+    c->esp += 4;                      /* the return address, as `ret` would */
+    return 1;
 }
 
 /*
@@ -1113,6 +1162,7 @@ int main(int argc, char **argv)
     es3_bind_guest(0x005BF730u, mk_no_update);
     es3_bind_guest(0x00740090u, mk_dinput_note);
     es3_bind_guest(0x005C38B0u, mk_credits);
+    es3_bind_guest(0x00676A20u, mk_one_cabinet);
 
     /*
      * The controller, which the game asks DirectInput for itself.
