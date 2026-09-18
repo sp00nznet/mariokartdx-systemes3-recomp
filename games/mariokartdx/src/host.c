@@ -97,14 +97,33 @@ static int mk_io_board_count(CPU *c)
 {
     static int off = -1, said, said_obj;
     if (off < 0) off = getenv("ES3_NO_BOARD") != NULL;
-    if (off) return 0;
     if (!said) {
         said = 1;
-        fprintf(stderr, "[board] the game asked how many I/O boards are on the "
-                        "USB bus; saying one.\n");
+        fprintf(stderr, off
+            ? "[board] letting the game count I/O boards for itself; it still "
+              "gets a cabinet ID, which is a separate question "
+              "(ES3_NO_BOARD).\n"
+            : "[board] the game asked how many I/O boards are on the USB bus; "
+              "saying one.\n");
     }
-    c->eax = 1;
-    c->esp += 4;                      /* the return address, as `ret` would */
+    /*
+     * Two answers, and they were never the same answer.
+     *
+     * This hook grew a second job - the cabinet ID below - and ES3_NO_BOARD
+     * switched off both. That only started to matter once the runtime could
+     * present a real synthetic board (ES3_IOBOARD): handing the count back to
+     * the game also took away its serial number, so the ID check set mode
+     * 0x52, the frame loop skipped the task tick, and the startup checklist
+     * never drew a row. Counting the board properly looked like the board
+     * making things worse.
+     *
+     * So ES3_NO_BOARD now means only "do not answer the count". A machine
+     * standing in for a cabinet has a serial number either way.
+     */
+    if (!off) {
+        c->eax = 1;
+        c->esp += 4;                  /* the return address, as `ret` would */
+    }
 
     /*
      * And the cabinet's identity, which is the very next thing it asks.
@@ -171,7 +190,7 @@ static int mk_io_board_count(CPU *c)
         }
 
     }
-    return 1;
+    return off ? 0 : 1;
 }
 
 /*
