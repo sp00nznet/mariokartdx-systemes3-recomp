@@ -95,7 +95,7 @@ __declspec(allocate(".CRT$XLB")) PIMAGE_TLS_CALLBACK es3_tls_cb = on_detach;
  */
 static int mk_io_board_count(CPU *c)
 {
-    static int off = -1, said, said_obj;
+    static int off = -1, said, said_obj, walked;
     if (off < 0) off = getenv("ES3_NO_BOARD") != NULL;
     if (!said) {
         said = 1;
@@ -120,9 +120,29 @@ static int mk_io_board_count(CPU *c)
      * So ES3_NO_BOARD now means only "do not answer the count". A machine
      * standing in for a cabinet has a serial number either way.
      */
+    /*
+     * Let the real walk happen ONCE, then answer from what it found.
+     *
+     * The game asks this about once a second, and the real enumeration is
+     * not cheap: it opens every USB host controller on the machine and walks
+     * every hub, thousands of DeviceIoControls a pass. On a cabinet that is
+     * a couple of devices; on a desktop with eleven hubs it is enough that
+     * the startup checklist stopped advancing past its header while the
+     * drive-unit step, which times out after 600 ticks, never got there.
+     *
+     * The count does not change, so there is no reason to keep asking. The
+     * first pass is the real one - it is what makes the board credible and
+     * fills in the cabinet ID - and every pass after it is answered here.
+     */
     if (!off) {
         c->eax = 1;
         c->esp += 4;                  /* the return address, as `ret` would */
+    } else if (walked) {
+        c->eax = 1;
+        c->esp += 4;
+        return 1;
+    } else {
+        walked = 1;                   /* this one goes to the real thing */
     }
 
     /*
