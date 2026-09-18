@@ -182,13 +182,33 @@ static int mk_io_board_count(CPU *c)
          * them (0x005C2214) only runs on the failure path we are trying not to
          * take. Writing one and not the other trades "no ID" for "the ID
          * changed", which is the same black screen. */
-        if (c->edi && rd16(c->edi + 0x498u) == 0) {
-            memcpy((void *)(uintptr_t)(c->edi + 0x498u), serial, sizeof serial);
-            memcpy((void *)(uintptr_t)(c->edi + 0x54u), serial, sizeof serial);
-            fprintf(stderr, "[board] and its cabinet ID was blank; "
-                            "giving it %ls.\n", serial);
+        /*
+         * And into BOTH objects, because the one being worked on is not
+         * always the one being checked.
+         *
+         * This used the object in edi only, and the warning above has been
+         * saying for a long time that edi and the singleton differ. It did
+         * not matter while this hook replaced the enumeration outright: the
+         * count alone was enough to get past. It matters as soon as the real
+         * enumeration runs (ES3_IOBOARD), because then the ID really is read
+         * and compared - mode 0x52, raised from 0x005C22BD - and the copy
+         * this wrote was in the object nobody looked at. The symptom was the
+         * hook reporting a blank ID over and over: it was writing one, then
+         * being asked again about a different object that still had none.
+         */
+        uint32_t objs[2];
+        unsigned k;
+        objs[0] = c->edi;
+        objs[1] = via_global;
+        for (k = 0; k < 2; k++) {
+            uint32_t o = objs[k];
+            if (!o || (k == 1 && o == objs[0])) continue;
+            if (rd16(o + 0x498u) != 0) continue;
+            memcpy((void *)(uintptr_t)(o + 0x498u), serial, sizeof serial);
+            memcpy((void *)(uintptr_t)(o + 0x54u), serial, sizeof serial);
+            fprintf(stderr, "[board] object %08X had no cabinet ID; "
+                            "giving it %ls.\n", o, serial);
         }
-
     }
     return off ? 0 : 1;
 }
@@ -245,7 +265,29 @@ static int mk_trace_error(CPU *c)
  * only one that names the site that decided. */
 static int mk_trace_raise(CPU *c)
 {
-    fprintf(stderr, "[err] raise(%u) from %08X\n", A32(0), rd32(c->esp));
+    uint32_t mode = A32(0);
+    fprintf(stderr, "[err] raise(%u) from %08X\n", mode, rd32(c->esp));
+
+    /*
+     * Mode 0x52 is "the cabinet ID changed", and the two strings it compares
+     * are the whole message: +0x498 is what was read from the board this run
+     * and +0x54 what the cabinet remembers. 0x005C1FB2 has already checked
+     * that +0x498 is twelve characters by the time this is raised, so a 0x52
+     * means they differ rather than that one is missing - and which way they
+     * differ says who wrote over whom.
+     */
+    if (mode == 0x52u) {
+        static int said;
+        uint32_t obj = rd32(0x00959B64u);
+        if (obj) obj = rd32(obj);
+        if (obj && !said) {
+            said = 1;
+            fprintf(stderr, "[err]   read this run  [+0x498] %.24ls\n"
+                            "[err]   remembered     [+0x054] %.24ls\n",
+                    (const wchar_t *)(uintptr_t)(obj + 0x498u),
+                    (const wchar_t *)(uintptr_t)(obj + 0x54u));
+        }
+    }
     return 0;
 }
 
