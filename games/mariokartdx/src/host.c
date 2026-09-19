@@ -621,6 +621,184 @@ static int mk_card_vendor_done(CPU *c)
  * whole fix, and it costs the network phase nothing: state 1 then takes the
  * 0x005BF320 path, which is the same "done" the real cabinet reaches.
  */
+/*
+ * What the card's sixteen bytes look like by the time the cipher sees them.
+ *
+ * 0x007AE4A0 takes the out struct and the card's field, matches "NBGIC" plus a
+ * generation digit against the table at 0x0081DCB0, then Blowfish-decrypts an
+ * eight byte block out of that field and folds a check byte over the result.
+ * Which eight of the sixteen, and where the check byte sits, is read in the
+ * listing through a stack copy whose base moves across several pushes - and
+ * hand-tracking that is exactly how the crypto got called RSA earlier today.
+ *
+ * So ask the game instead. This prints the field verbatim, and card.c can put
+ * a distinctive pattern on the card, which makes the mapping from card bytes
+ * to field bytes something to read off rather than derive.
+ *
+ * Returns 0 always: the game's own code runs, this only watches.
+ * ES3_TRACE_CARDFIELD to switch on.
+ */
+static int mk_card_field(CPU *c)
+{
+    static int on = -1, said;
+    uint32_t field;
+    int i;
+
+    if (on < 0) on = getenv("ES3_TRACE_CARDFIELD") != NULL;
+    if (!on || said > 7) return 0;
+    said++;
+
+    /* At entry the arguments are still where the caller pushed them. */
+    field = A32(1);
+    fprintf(stderr, "[cardfield] 0x007AE4A0(out=%08X, field=%08X):",
+            A32(0), field);
+    if (field) {
+        fputc(' ', stderr);
+        for (i = 0; i < 16; i++) fprintf(stderr, "%02X ", rd8(field + i));
+        fputc('|', stderr);
+        for (i = 0; i < 16; i++) {
+            unsigned char b = rd8(field + i);
+            fputc(b >= 0x20 && b < 0x7F ? (char)b : '.', stderr);
+        }
+        fputc('|', stderr);
+    }
+    fputc('\n', stderr);
+    fflush(stderr);
+    return 0;
+}
+
+/*
+ * Which of the card functions actually runs, and with what.
+ *
+ * There are three validators - 0x007ACE40, 0x007AD0E0 and 0x007AD1D0 - each
+ * accepting a different set of generation digits, and reading the listing did
+ * not say which one a tapped card goes through. Hooking 0x007AE4A0 to find out
+ * printed nothing at all, because the rejection happens before the cipher is
+ * ever reached. So log the whole family and let the game answer.
+ *
+ * Each prints its first two arguments and the return address that reached it,
+ * once per call site, and lets the original run. ES3_TRACE_CARDFN.
+ */
+static void card_fn(CPU *c, const char *what)
+{
+    static int on = -1;
+    static struct { const char *what; uint32_t from; } seen[24];
+    static int n;
+    uint32_t from;
+    int i;
+
+    if (on < 0) on = getenv("ES3_TRACE_CARDFN") != NULL;
+    if (!on) return;
+    from = rd32(c->esp);
+    for (i = 0; i < n; i++)
+        if (seen[i].what == what && seen[i].from == from) return;
+    if (n < 24) { seen[n].what = what; seen[n].from = from; n++; }
+    fprintf(stderr, "[cardfn] %s(%08X, %08X) from %08X\n",
+            what, A32(0), A32(1), from);
+    fflush(stderr);
+}
+
+#define MK_CARD_FN(name, label)                     \
+    static int name(CPU *c) { card_fn(c, label); return 0; }
+
+MK_CARD_FN(mk_cf_acd40, "007ACD40")
+MK_CARD_FN(mk_cf_acdc0, "007ACDC0 second gate")
+MK_CARD_FN(mk_cf_ace40, "007ACE40 validator A (0367)")
+MK_CARD_FN(mk_cf_ad0e0, "007AD0E0 validator B (2567)")
+MK_CARD_FN(mk_cf_ad1d0, "007AD1D0 validator C (1467)")
+MK_CARD_FN(mk_cf_ae4a0, "007AE4A0 table lookup")
+/* The cipher's own inputs: which bytes of the card become L and R, and which
+ * generation context is used. edx carries the context pointer as a register
+ * argument, so the generation is (edx - 0x009462A8) / 0x1048. */
+static int mk_cf_ae1e0(CPU *c)
+{
+    static int on = -1, said;
+    uint32_t a, b, base;
+
+    if (on < 0) on = getenv("ES3_TRACE_CARDFN") != NULL;
+    if (!on || said > 3) return 0;
+    said++;
+    a = A32(0);
+    b = A32(1);
+    base = GVA(0x009462A8u);
+    fprintf(stderr, "[cardfn] blowfish(arg1=%08X -> %08X, arg2=%08X -> %08X)"
+                    " context %08X = generation %d\n",
+            a, a ? rd32(a) : 0, b, b ? rd32(b) : 0, c->edx,
+            c->edx >= base ? (int)((c->edx - base) / 0x1048u) : -1);
+    fflush(stderr);
+    return 0;
+}
+
+/*
+ * The six bytes the game actually pulled off the card.
+ *
+ * 0x007ACE40 does not compare a run of card bytes. It copies four from one
+ * local and two from another eight bytes further on, and only then compares
+ * five of them against "NBGIC" - so the signature is split on the card, which
+ * is why writing it contiguously failed. Where the two pieces sit is a stack
+ * offset inside a 0x48 byte frame, and this file has already paid twice for
+ * deriving those by hand.
+ *
+ * So watch the comparison instead. memcmp at 0x007CB6AE is called with the
+ * literal at 0x0081DC64 as its first argument only on this path, so filtering
+ * on that gives the extracted bytes and nothing else. Put a walking pattern on
+ * the card and the offsets read straight off the output.
+ *
+ * ES3_TRACE_CARDCMP.
+ */
+static int mk_card_memcmp(CPU *c)
+{
+    static int on = -1, said;
+    uint32_t a, b;
+    int i;
+
+    if (on < 0) on = getenv("ES3_TRACE_CARDCMP") != NULL;
+    if (!on) return 0;
+    a = A32(0);
+    b = A32(1);
+    if (a != 0x0081DC64u || said > 5) return 0;
+    said++;
+
+    fprintf(stderr, "[cardcmp] the game extracted:");
+    for (i = 0; i < 6; i++) fprintf(stderr, " %02X", rd8(b + i));
+    fprintf(stderr, "  |");
+    for (i = 0; i < 6; i++) {
+        unsigned char v = rd8(b + i);
+        fputc(v >= 0x20 && v < 0x7F ? (char)v : '.', stderr);
+    }
+    fprintf(stderr, "|  (wanted NBGIC + 0/3/6/7)\n");
+    fflush(stderr);
+    return 0;
+}
+
+/*
+ * Is the axis enumeration callback actually running?
+ *
+ * Planting 0x0073FF80 makes it reachable; it does not prove DINPUT8 calls it,
+ * and "no input" is the same symptom either way. This logs each call and the
+ * object it is being told about, so "never called" and "called and found
+ * nothing useful" stop looking alike.
+ *
+ * The argument is a DIDEVICEOBJECTINSTANCE*: dwSize at +0, the GUID of the
+ * object type at +4, dwOfs at +0x14, dwType at +0x18 - the low byte of which
+ * says which axis, and bit 0x01000000 marks it an absolute axis.
+ */
+static int mk_axis_enum(CPU *c)
+{
+    static int n;
+    uint32_t obj = A32(0);
+    if (n < 16) {
+        n++;
+        fprintf(stderr, "[in] axis callback #%d: object %08X", n, obj);
+        if (obj)
+            fprintf(stderr, " dwOfs %u dwType %08X",
+                    rd32(obj + 0x14u), rd32(obj + 0x18u));
+        fputc('\n', stderr);
+        fflush(stderr);
+    }
+    return 0;                          /* the game's own callback still runs */
+}
+
 static int mk_vendor_link_up(CPU *c)
 {
     static int off = -1;
@@ -1443,12 +1621,21 @@ int main(int argc, char **argv)
      * mistake this file already has a paragraph about. */
     es3_bind_guest(0x005BF220u, mk_cabinet_boot);
     es3_bind_guest(0x00678D30u, mk_vendor_link_up);
+    es3_bind_guest(0x007CB6AEu, mk_card_memcmp);
+    es3_bind_guest(0x007ACD40u, mk_cf_acd40);
+    es3_bind_guest(0x007ACDC0u, mk_cf_acdc0);
+    es3_bind_guest(0x007ACE40u, mk_cf_ace40);
+    es3_bind_guest(0x007AD0E0u, mk_cf_ad0e0);
+    es3_bind_guest(0x007AD1D0u, mk_cf_ad1d0);
+    es3_bind_guest(0x007AE1E0u, mk_cf_ae1e0);
+    es3_bind_guest(0x007AE4A0u, mk_card_field);
     es3_bind_guest(0x007A8590u, mk_io_board_count);
     es3_bind_guest(0x00679470u, mk_net_ok);
     es3_bind_guest(0x005BF340u, mk_boot_net_state);
     es3_bind_guest(0x005BF730u, mk_no_update);
     es3_bind_guest(0x00740090u, mk_dinput_note);
     es3_bind_guest(0x0073FF60u, mk_pad_is_the_wheel);
+    es3_bind_guest(0x0073FF80u, mk_axis_enum);
     es3_bind_guest(0x00740590u, mk_input_trace);
     es3_bind_guest(0x005C38B0u, mk_credits);
     es3_bind_guest(0x00676A20u, mk_one_cabinet);
@@ -1471,7 +1658,33 @@ int main(int argc, char **argv)
      * ES3_NO_DINPUT leaves it raw, which is how to watch the enumeration find
      * a controller and tell nobody.
      */
-    if (!getenv("ES3_NO_DINPUT")) es3_plant_callback(0x0073FF60u);
+    /*
+     * And the OTHER enumeration callback, which is why the wheel never moved.
+     *
+     * Planting 0x0073FF60 got the game a controller. It did not get it any
+     * axes, because finding a device is only the first enumeration - having
+     * one, 0x007401AF calls EnumObjects through the device vtable's slot 4
+     * with flags 3, every axis, and hands DINPUT8.dll a second guest address:
+     *
+     *     007401A6  push 0x73ff80          ; the per-object callback
+     *     007401AC  mov  ecx, [edx + 0x10] ; IDirectInputDevice8::EnumObjects
+     *     007401AF  call ecx
+     *
+     * That one was never planted, and nothing said so: it is not in the
+     * planted list and never appears among the [r2l] redirects either, so the
+     * real DLL called an address that is not code and the axis walk quietly
+     * found nothing. The pad was reporting a perfect X - 0 hard left, 32767
+     * centred, 65535 hard right, measured off the wire - to a game that had
+     * registered no axis to put it in, so steering sat at its default, which
+     * is full lock.
+     *
+     * Two callbacks, one for devices and one for their objects, and both have
+     * to be reachable.
+     */
+    if (!getenv("ES3_NO_DINPUT")) {
+        es3_plant_callback(0x0073FF60u);   /* devices */
+        es3_plant_callback(0x0073FF80u);   /* their axes and buttons */
+    }
 
     guest_init_cpu(&cpu);
     es3_watch_cpu(&cpu);
