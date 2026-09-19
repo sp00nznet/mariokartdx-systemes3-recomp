@@ -1095,6 +1095,58 @@ static int mk_pad_is_the_wheel(CPU *c)
  * at a time and the log names its bit; move one stick and the log names the
  * axis and its range. That is the mapping, measured rather than guessed.
  */
+/*
+ * Give the pad the range the game's arithmetic expects.
+ *
+ * 0x00740879 reads the raw axis, subtracts a centre and divides by the double
+ * at 0x008E0C30 - which is 1000000000.0, and the clamp just above it compares
+ * against the same 1e9. So the wheel this game was built for reports an
+ * encoder spanning +/- 1e9, and its enumeration callback at 0x0073FF80 is a
+ * bare `mov eax,1; ret 8`: it counts objects and sets no range, because a real
+ * cabinet wheel arrives with that range already.
+ *
+ * A gamepad arrives with 0..65535. Full stick is then 0.000033 of full lock -
+ * measured, the wheel moved 0.0000 to 0.0001 across the pad's entire travel -
+ * which is a kart that drives straight whatever you do.
+ *
+ * Rather than scale the numbers behind the game's back, tell DirectInput what
+ * range to report: the device pointer in the record is a real one, so
+ * SetProperty(DIPROP_RANGE) over the whole device makes dinput8 itself do the
+ * scaling and the game's maths is left exactly as written. The device is
+ * already acquired by this point and a range cannot be set on an acquired
+ * device, so it is unacquired around the call and re-acquired after.
+ */
+static void mk_axis_range(uint32_t rec)
+{
+    struct { uint32_t dwSize, dwHeaderSize, dwObj, dwHow; int32_t lMin, lMax; }
+        range;
+    void **iface = (void **)(uintptr_t)rd32(rec + 0x44Cu);
+    void **vt;
+    long hr;
+    const char *w = getenv("ES3_WHEEL_RANGE");
+    int32_t span = w ? (int32_t)strtol(w, NULL, 0) : 1000000000;
+
+    if (!iface || getenv("ES3_NO_WHEEL_RANGE")) return;
+    vt = (void **)*iface;
+
+    range.dwSize = sizeof range;
+    range.dwHeaderSize = 16;
+    range.dwObj = 0;
+    range.dwHow = 0;                   /* DIPH_DEVICE: every axis at once */
+    range.lMin = -span;
+    range.lMax = span;
+
+    ((long (__stdcall *)(void *))vt[8])(iface);            /* Unacquire */
+    hr = ((long (__stdcall *)(void *, const void *, const void *))vt[6])(
+             iface, (const void *)4 /* DIPROP_RANGE */, &range);
+    ((long (__stdcall *)(void *))vt[7])(iface);            /* Acquire */
+
+    fprintf(stderr, "[in] asked the pad for a +/-%d axis range, which is what "
+                    "the game divides by: %s (hr %08lX)\n",
+            span, hr >= 0 ? "accepted" : "refused", (unsigned long)hr);
+    fflush(stderr);
+}
+
 static int mk_input_trace(CPU *c)
 {
     static int off = -1, said;
@@ -1105,6 +1157,22 @@ static int mk_input_trace(CPU *c)
     uint32_t mgr, base, n, k;
 
     if (off < 0) off = getenv("ES3_TRACE_INPUT") == NULL;
+
+    /* The range fix runs whether or not anyone is watching: it is the fix,
+     * not the trace. Once per device, after the game has enumerated and
+     * acquired it - which is exactly when this poll first runs. */
+    {
+        static int ranged;
+        uint32_t m = rd32(c->esp + 4u);
+        if (!ranged && m) {
+            uint32_t b = rd32(m + 4u), cnt = rd32(m + 8u), i;
+            if (b && cnt && cnt <= 4u) {
+                ranged = 1;
+                for (i = 0; i < cnt; i++) mk_axis_range(b + i * 0x780u);
+            }
+        }
+    }
+
     if (off) return 0;
 
     mgr = rd32(c->esp + 4u);          /* the return address is at [esp] */
@@ -1156,6 +1224,25 @@ static int mk_input_trace(CPU *c)
         {   /* rgdwPOV is DIJOYSTATE2 + 0x20: six axes, two sliders, then
              * four hats. An Xbox d-pad arrives here, not in the buttons,
              * which is why a d-pad can do nothing while buttons work. */
+            /*
+             * What the game actually steers with.
+             *
+             * 0x00740879 reads the raw X, subtracts a centre from a
+             * calibration record and divides by a range, then stores the
+             * result at +0x62C - so THIS is the wheel, and the raw axis is
+             * only its input. Printing both says whether a perfect axis is
+             * being turned into a bad wheel, which is the whole question.
+             */
+            {
+                static uint32_t last_norm[4];
+                uint32_t nrm = rd32(rec + 0x62Cu);
+                if (nrm != last_norm[k]) {
+                    float f; memcpy(&f, &nrm, 4);
+                    last_norm[k] = nrm;
+                    fprintf(stderr, "[in] dev%u wheel %.4f (raw X %d)\n",
+                            k, f, (int)rd32(rec + 0x47Cu));
+                }
+            }
             uint32_t pov = rd32(rec + 0x47Cu + 0x20u);
             if (pov != last_pov[k]) {
                 fprintf(stderr, "[in] dev%u pov %08X (%s)\n", k, pov,
