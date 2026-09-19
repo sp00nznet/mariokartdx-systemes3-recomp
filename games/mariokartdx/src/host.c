@@ -1773,6 +1773,40 @@ int main(int argc, char **argv)
         es3_plant_callback(0x0073FF80u);   /* their axes and buttons */
     }
 
+    /*
+     * And the drive board's I/O completion, which is the same bug a third
+     * time and is why the wheel is crossed out on screen all run.
+     *
+     * 0x00746580 talks to the board on COM1 with overlapped I/O - the
+     * ERROR_IO_PENDING test at 0x0074663A says so - and hands the real
+     * kernel32 a completion routine at 0x00745F40:
+     *
+     *     00746615  push 0x745f40           ; the completion routine
+     *     00746627  call dword ptr [0x81d108]
+     *     0074662D  test eax, eax
+     *
+     * That address was never planted and never turns up among the [r2l]
+     * redirects either, so no completion ever lands. Measured over one run:
+     * the game wrote 231 frames to the board and read back nothing at all,
+     * which is a wheel whose position never arrives.
+     *
+     * Planting it is necessary and not sufficient - jvs.c still answers this
+     * port in JVS, which the drive board does not speak - but a routine that
+     * cannot be called is the first thing in the way.
+     *
+     * Off by default, and that is the point rather than caution. Planting it
+     * changes the conversation: before, the game wrote 231 frames and posted
+     * no reads at all; after, it posts 191 reads and writes nothing, because
+     * it is now waiting for the board to answer first. jvs.c answers that
+     * port in JVS, the board does not speak JVS, and the boot stops at the
+     * system menu waiting for a reply that never makes sense.
+     *
+     * So this stays behind ES3_DRIVE_CB until the protocol is answered. It is
+     * the right fix arriving before the thing it enables - useful for working
+     * on the board, and a stall for anyone trying to play.
+     */
+    if (getenv("ES3_DRIVE_CB")) es3_plant_callback(0x00745F40u);
+
     guest_init_cpu(&cpu);
     es3_watch_cpu(&cpu);
 
