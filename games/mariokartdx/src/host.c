@@ -917,11 +917,26 @@ static int mk_steer_consumer(CPU *c)
     if (on < 0) on = getenv("ES3_TRACE_STEER") == NULL;
     if (on || said) return 0;
 
-    /* Every dereference checked. ebx only becomes the manager partway into
-     * this function - at entry it holds whatever the caller left there - so
-     * reading through it here segfaulted the first time this was written. */
-    if (!mk_readable(c->ebx + 0x0Cu, 4)) return 0;
-    mgr = rd32(c->ebx + 0x0Cu);
+    /*
+     * The manager from the global, not from a register.
+     *
+     * 0x0063D000 takes its manager from ebx, which the caller sets partway
+     * through; at this function's entry ebx is whatever was last in it.
+     * Reading through it segfaulted the game once, and after the read was
+     * guarded it reported a manager of 004C0045 - wide character text - with
+     * 410880264 devices. A guard proves memory is committed, not that it
+     * means anything.
+     *
+     * The singleton at 0x00959B54 holds the same manager at +4 and is true
+     * whenever it is non-null, which is what a tracer needs.
+     */
+    {
+        uint32_t sing;
+        if (!mk_readable(0x00959B54u, 4)) return 0;
+        sing = rd32(0x00959B54u);
+        if (!mk_readable(sing + 4u, 4)) return 0;
+        mgr = rd32(sing + 4u);
+    }
     if (!mk_readable(mgr, 0x780u)) return 0;
     said = 1;
 
