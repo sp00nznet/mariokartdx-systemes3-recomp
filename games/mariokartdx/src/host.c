@@ -931,11 +931,25 @@ static int mk_steer_consumer(CPU *c)
      * whenever it is non-null, which is what a tracer needs.
      */
     {
+        /*
+         * +0x0C, which is what the game itself uses. 0x0063C649 does exactly
+         * this chain:
+         *
+         *     0063C649  mov esi, [0x959b54]      ; the singleton
+         *     0063C64F  mov ecx, [esi + 0x0c]    ; the manager
+         *     0063C652  cmp [ecx + 8], edx       ; its device count
+         *     0063C657  mov ecx, [ecx]           ; the wheel record
+         *
+         * So ebx in 0x0063D000 is the singleton, not the manager, and the
+         * +4 first tried here was borrowed from a different chain in the
+         * input tracer. Two wrong bases in a row is why this printed a
+         * manager made of wide character text.
+         */
         uint32_t sing;
         if (!mk_readable(0x00959B54u, 4)) return 0;
         sing = rd32(0x00959B54u);
-        if (!mk_readable(sing + 4u, 4)) return 0;
-        mgr = rd32(sing + 4u);
+        if (!mk_readable(sing + 0x0Cu, 4)) return 0;
+        mgr = rd32(sing + 0x0Cu);
     }
     if (!mk_readable(mgr, 0x780u)) return 0;
     said = 1;
