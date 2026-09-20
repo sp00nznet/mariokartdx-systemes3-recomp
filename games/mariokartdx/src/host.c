@@ -1393,6 +1393,38 @@ static int mk_input_trace(CPU *c)
         return 0;
     }
 
+    /*
+     * Whether this device was designated THE WHEEL, which is the question
+     * the steering consumer asks and nothing has yet answered.
+     *
+     * 0x0074044B sets mgr+0x10 to 1 and mgr+0 to the record when the product
+     * name matches the Immersion string, and 0x0063D07A reads mgr+0 back and
+     * refuses to load the wheel unless that record's state at +0x590 is
+     * non-zero. All of it is settled at startup, so it can be reported from
+     * attract mode - no race, no driving, which matters when an awake pad is
+     * the scarce resource.
+     */
+    {
+        static int told;
+        uint32_t sing = mk_readable(0x00959B54u, 4) ? rd32(0x00959B54u) : 0u;
+        uint32_t smgr = mk_readable(sing + 0x0Cu, 4) ? rd32(sing + 0x0Cu) : 0u;
+        if (!told && mk_readable(smgr, 0x780u)) {
+            uint32_t wrec = rd32(smgr);
+            told = 1;
+            fprintf(stderr, "[steer] designated wheel: record %08X, flag %u, "
+                            "count %u\n", wrec, rd32(smgr + 0x10u),
+                    rd32(smgr + 8u));
+            if (mk_readable(wrec, 0x780u))
+                fprintf(stderr, "[steer]   its state +0x590 = %u (0 means the "
+                                "wheel is never loaded), mode +0x77C = %u\n",
+                        rd32(wrec + 0x590u), rd32(wrec + 0x77Cu));
+            else
+                fprintf(stderr, "[steer]   no record designated - the wheel "
+                                "can never be read\n");
+            fflush(stderr);
+        }
+    }
+
     if (!said) {
         said = 1;
         fprintf(stderr, "[in] manager %08X, %u device(s) at %08X, "
