@@ -928,6 +928,16 @@ static int mk_steer_consumer(CPU *c)
     count = rd32(mgr + 8u);
     rec   = rd32(mgr);
     mode  = rd32(mgr + 0x77Cu);
+
+    /*
+     * Committed is not the same as meaningful. The first version checked
+     * only that the memory could be read and duly reported a manager of
+     * 004C0045 - wide character text - with 410880264 devices. ebx is not
+     * the manager at this function's entry, so the numbers have to be
+     * plausible before they are worth printing.
+     */
+    if (count == 0u || count > 4u) { said = 0; return 0; }
+    if (!mk_readable(rec, 0x780u)) { said = 0; return 0; }
     state = mk_readable(rec, 0x780u) ? rd32(rec + 0x590u) : 0u;
     wheel = mk_readable(rec, 0x780u) ? rd32(rec + 0x62Cu) : 0u;
 
@@ -1331,6 +1341,28 @@ static int mk_input_trace(CPU *c)
     base = rd32(mgr + 4u);
     n = rd32(mgr + 8u);
     if (!base || n > 4u) return 0;
+
+    /*
+     * Nought controllers is the single most wasteful state this runtime can
+     * be in, and it is silent. The game enumerates once, at startup: a pad
+     * asleep at that instant leaves the whole run with no input - buttons
+     * included - which looks exactly like a broken build and has cost
+     * several test runs already. Say it, once, unmissably.
+     */
+    if (!n) {
+        static int moaned;
+        if (!moaned) {
+            moaned = 1;
+            fprintf(stderr,
+                "\n[in] THE GAME FOUND NO CONTROLLER.\n"
+                "     It enumerates once, at startup, so nothing will work "
+                "this run - buttons or steering.\n"
+                "     Wake the pad (press its button until the ring is "
+                "solid) and start the game again.\n\n");
+            fflush(stderr);
+        }
+        return 0;
+    }
 
     if (!said) {
         said = 1;
