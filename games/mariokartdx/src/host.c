@@ -799,6 +799,157 @@ static int mk_axis_enum(CPU *c)
     return 0;                          /* the game's own callback still runs */
 }
 
+/*
+ * The steering mode, which is why the kart drove itself into the wall.
+ *
+ * The pad's axis was never the problem: measured on the wire it gives 0 at
+ * full left, 32767 centred and 65535 at full right, and after the range fix
+ * the game's own wheel value at rec+0x62C follows it exactly. The game then
+ * throws that value away, and 0x0063D0A7 says why:
+ *
+ *     0063D0A7  cmp dword ptr [eax + 0x77c], 2   ; the steering mode
+ *     0063D0AE  je  0x63d0cb                     ; 2: use the analog wheel
+ *     0063D0B0  fld dword ptr [0x86aa8c]         ; anything else: 0.3
+ *
+ * 0.3 of full lock, constantly, in one direction - which is exactly what a
+ * kart that steers into the wall on its own looks like.
+ *
+ * The mode comes from 0x0073FF90, which walks a three entry table at
+ * 0x008DA25C comparing the device's product name and returning the mode
+ * beside it, or 3 when nothing matches:
+ *
+ *     [0] mode 0   "Controller (XBOX 360 For Windows)"
+ *     [1] mode 1   "JC-PS101U"
+ *     [2] mode 2   "Thrustmaster T500 RS Racing wheel"
+ *
+ * So only a T500 gets the analog path, and the name this runtime writes -
+ * "Immersion TouchSense Steering Wheel (USB HID)" - is in none of them, so
+ * the lookup falls through to 3. That name is not wrong: a different check
+ * at 0x007403FE wants exactly it, and matching there is what designates this
+ * device as the wheel at all (mgr+0 and mgr+0x10). One device cannot carry
+ * both names, so the name stays as it is and the mode is answered here.
+ *
+ * Returning 2 rather than forcing rec+0x77C because this is where the answer
+ * is decided; writing the field afterwards would leave the decision and its
+ * result disagreeing. No stack arguments - the name arrives in edi.
+ *
+ * ES3_NO_WHEEL_MODE to leave the game's own answer alone.
+ */
+static int mk_wheel_mode(CPU *c)
+{
+    static int off = -1, said;
+    unsigned mode;
+    const char *want;
+
+    if (off < 0) off = getenv("ES3_NO_WHEEL_MODE") != NULL;
+    if (off) return 0;
+
+    want = getenv("ES3_WHEEL_MODE");
+    mode = want ? (unsigned)strtoul(want, NULL, 0) : 2u;
+
+    if (!said) {
+        said = 1;
+        fprintf(stderr, "[in] the steering mode lookup wanted a Thrustmaster "
+                        "T500; answering %u instead, so it does not fall "
+                        "through to 3 and steer with a fixed 0.3 "
+                        "(ES3_WHEEL_MODE to change, ES3_NO_WHEEL_MODE to "
+                        "stop)\n", mode);
+        fflush(stderr);
+    }
+    /*
+     * Which mode, settable, because the table names tell two stories and
+     * only the game can say which is right for a pad:
+     *
+     *   0  "Controller (XBOX 360 For Windows)"   a pad, handled as a pad
+     *   1  "JC-PS101U"                           another pad
+     *   2  "Thrustmaster T500 RS Racing wheel"   a real wheel, read directly
+     *   3  no match                              what we had: a fixed 0.3
+     *
+     * 2 removed the constant pull, which proves the mode reaches the
+     * steering, but left the stick doing nothing - consistent with 2 reading
+     * a cabinet wheel this machine does not have. 0 is the mode written for
+     * the very pad in your hands, so it is the next one to try.
+     */
+    c->eax = (uint32_t)mode;
+    c->esp += 4;                       /* consume the return address */
+    return 1;
+}
+
+/* Is this guest address safe to read? A tracer that crashes the game is
+ * worse than no tracer, and a register read mid-function is only sometimes
+ * a pointer. */
+static int mk_readable(uint32_t va, uint32_t len)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!va) return 0;
+    if (!VirtualQuery((void *)(uintptr_t)va, &mbi, sizeof mbi)) return 0;
+    if (mbi.State != MEM_COMMIT) return 0;
+    if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return 0;
+    return (uintptr_t)va + len <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+}
+
+/*
+ * The steering consumer, watched where it decides.
+ *
+ * Setting the mode at 0x0073FF90 only helps if the code that READS it is
+ * looking at the same record, and 0x0063D000 reaches its one through a
+ * chain that has never been checked:
+ *
+ *     0063D071  mov eax, [ebx + 0x0c]     ; the manager
+ *     0063D074  cmp dword ptr [eax + 8], 0  ; how many devices
+ *     0063D07A  mov ecx, [eax]            ; the record designated the wheel
+ *     0063D07C  cmp dword ptr [ecx + 0x590], 0   ; its state
+ *     0063D087  fld dword ptr [ecx + 0x62c]      ; the wheel value
+ *     0063D0A7  cmp dword ptr [eax + 0x77c], 2   ; the mode
+ *
+ * Note the last one reads +0x77C off EAX, the manager's first record, not
+ * off the record it just took the wheel from. If those differ, a mode
+ * written to one is read from the other and the fix lands nowhere.
+ *
+ * Printed once, with every link, so the answer is read rather than deduced.
+ * ES3_TRACE_STEER.
+ */
+static int mk_steer_consumer(CPU *c)
+{
+    static int on = -1, said;
+    uint32_t mgr, count, rec, state, mode, wheel;
+
+    if (on < 0) on = getenv("ES3_TRACE_STEER") == NULL;
+    if (on || said) return 0;
+
+    /* Every dereference checked. ebx only becomes the manager partway into
+     * this function - at entry it holds whatever the caller left there - so
+     * reading through it here segfaulted the first time this was written. */
+    if (!mk_readable(c->ebx + 0x0Cu, 4)) return 0;
+    mgr = rd32(c->ebx + 0x0Cu);
+    if (!mk_readable(mgr, 0x780u)) return 0;
+    said = 1;
+
+    count = rd32(mgr + 8u);
+    rec   = rd32(mgr);
+    mode  = rd32(mgr + 0x77Cu);
+    state = mk_readable(rec, 0x780u) ? rd32(rec + 0x590u) : 0u;
+    wheel = mk_readable(rec, 0x780u) ? rd32(rec + 0x62Cu) : 0u;
+
+    {
+        float f;
+        memcpy(&f, &wheel, 4);
+        fprintf(stderr,
+            "[steer] manager %08X: %u device(s), wheel record %08X, "
+            "state %u\n"
+            "[steer]   mode at manager+0x77C = %u %s\n"
+            "[steer]   wheel value = %.4f\n",
+            mgr, count, rec, state, mode,
+            mode == 2u ? "(2: the analog path)"
+                       : "(not 2: the fixed 0.3 path)", f);
+        if (mk_readable(rec, 0x780u))
+            fprintf(stderr, "[steer]   mode at record+0x77C = %u\n",
+                    rd32(rec + 0x77Cu));
+        fflush(stderr);
+    }
+    return 0;
+}
+
 static int mk_vendor_link_up(CPU *c)
 {
     static int off = -1;
@@ -1722,6 +1873,8 @@ int main(int argc, char **argv)
     es3_bind_guest(0x005BF730u, mk_no_update);
     es3_bind_guest(0x00740090u, mk_dinput_note);
     es3_bind_guest(0x0073FF60u, mk_pad_is_the_wheel);
+    es3_bind_guest(0x0073FF90u, mk_wheel_mode);
+    es3_bind_guest(0x0063D000u, mk_steer_consumer);
     es3_bind_guest(0x0073FF80u, mk_axis_enum);
     es3_bind_guest(0x00740590u, mk_input_trace);
     es3_bind_guest(0x005C38B0u, mk_credits);
