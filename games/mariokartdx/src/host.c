@@ -529,6 +529,32 @@ static int mk_steering_off(CPU *c)
     static int off = -1, said;
     if (off < 0) off = getenv("ES3_STEERING_ON") != NULL;
     if (off || !c->ecx) return 0;
+
+    /*
+     * Every call, not only the first.
+     *
+     * Writing it once was not enough. This hook returns 0, so the game's own
+     * steering task still runs behind it, decides for itself that the
+     * potentiometer is absent, and puts [this+0xAD8] back to zero. On screen
+     * that is the crossed-out steering wheel in the corner - and far worse,
+     * a game that believes no wheel is fitted never reads one.
+     *
+     * On this cabinet the menus are navigated BY STEERING: there are no
+     * direction switches to press, which is why the d-pad and the arrow keys
+     * appear to do nothing and only ITEM and COIN work. So a zero here is not
+     * "steering is broken", it is every control dead.
+     */
+    {
+        static uint32_t rezeroed;
+        if (rd32(c->ecx + 0xAD8u) == 0u && rezeroed < 0xFFFFFFFFu) {
+            if (++rezeroed == 2u)          /* the first is simply the initial state */
+                fprintf(stderr,
+                    "[wheel] the game keeps putting the wheel back to NOT "
+                    "FITTED; holding it at fitted every frame.\n");
+        }
+        wr32(c->ecx + 0xAD8u, getenv("ES3_STEERING_OFF") ? 0u : 1u);
+    }
+
     if (rd32(c->ecx + 0x54u) != 2u) {
         /* Complete, and PRESENT - not "not fitted".
          *
@@ -544,9 +570,17 @@ static int mk_steering_off(CPU *c)
              getenv("ES3_STEERING_OFF") ? 0u : 1u);
         if (!said) {
             said = 1;
-            fprintf(stderr, "[wheel] there is no steering potentiometer on "
-                            "this machine; telling the boot the check is done "
-                            "and it is not fitted (ES3_STEERING_ON).\n");
+            /* Say what is written, not what was written two revisions ago.
+             * This claimed "not fitted" long after the code started writing
+             * fitted, and a log that contradicts its own code costs more
+             * than no log at all - it sent this session looking for a
+             * missing wheel that was already being reported present. */
+            fprintf(stderr, "[wheel] no steering potentiometer answers on "
+                            "this machine; telling the boot the check is "
+                            "done and the wheel IS fitted%s "
+                            "(ES3_STEERING_OFF for absent, ES3_STEERING_ON "
+                            "to leave it to the serial port).\n",
+                    getenv("ES3_STEERING_OFF") ? " - overridden to absent" : "");
         }
     }
     return 0;                         /* the game's own task still runs */
@@ -915,7 +949,41 @@ static int mk_steer_consumer(CPU *c)
     uint32_t mgr, count, rec, state, mode, wheel;
 
     if (on < 0) on = getenv("ES3_TRACE_STEER") == NULL;
-    if (on || said) return 0;
+    if (on) return 0;
+
+    /*
+     * The one measurement that says whether this consumer is the problem.
+     *
+     * The poll fills record+0x62C and this function reads it, and both have
+     * been watched - separately. Watching the value HERE, every time it
+     * changes, is what tells the two apart: if it sweeps, the wheel reaches
+     * the consumer and whatever ignores it is further on; if it stays at zero
+     * while the poll's trace sweeps, they are not the same record.
+     *
+     * Printed on change rather than once, because the question is about
+     * movement. Reported through the same manager the game itself uses,
+     * [0x00959B54]+0x0C, and its designated record.
+     */
+    {
+        static uint32_t last = 0xFFFFFFFFu;
+        uint32_t sing = mk_readable(0x00959B54u, 4) ? rd32(0x00959B54u) : 0u;
+        uint32_t smgr = (sing && mk_readable(sing + 0x0Cu, 4))
+                        ? rd32(sing + 0x0Cu) : 0u;
+        if (smgr && mk_readable(smgr, 4)) {
+            uint32_t wrec = rd32(smgr);
+            if (mk_readable(wrec + 0x62Cu, 4)) {
+                uint32_t w = rd32(wrec + 0x62Cu);
+                if (w != last) {
+                    float f; memcpy(&f, &w, 4);
+                    last = w;
+                    fprintf(stderr, "[steer] consumer sees %.4f\n", f);
+                    fflush(stderr);
+                }
+            }
+        }
+    }
+
+    if (said) return 0;
 
     /*
      * The manager from the global, not from a register.
