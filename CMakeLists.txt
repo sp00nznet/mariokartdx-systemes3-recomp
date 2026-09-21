@@ -32,6 +32,7 @@ file(GLOB LIFTED CONFIGURE_DEPENDS "${GEN}/recomp_funcs_*.c")
 if(LIFTED AND EXISTS "${GEN}/recomp_imports.h")
     add_executable(mariokartdx
         games/mariokartdx/src/host.c
+        games/mariokartdx/src/synthpad.c
         ${LIFTED}
     )
     es3_runtime(mariokartdx "${GEN}")

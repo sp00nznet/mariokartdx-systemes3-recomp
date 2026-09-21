@@ -989,6 +989,8 @@ static int mk_steer_consumer(CPU *c)
     return 0;
 }
 
+void es3_synthpad_attach(void);
+
 static int mk_vendor_link_up(CPU *c)
 {
     static int off = -1;
@@ -1549,6 +1551,17 @@ static int mk_dinput_note(CPU *c)
             fprintf(stderr, "[dinput] the game has no DirectInput object, so "
                             "it will not look for a controller at all\n");
     }
+    /*
+     * And the synthetic controller attaches here, in this hook rather than
+     * its own.
+     *
+     * 0x00740090 already had a hook, and es3_bind_guest keeps the first
+     * binding for an address - so a second one for the same VA is simply
+     * dead. It was bound, it built, it ran, and it printed nothing at all,
+     * which took a while to tell apart from a hook that had fired and found
+     * nothing to do.
+     */
+    es3_synthpad_attach();
     return 0;
 }
 
