@@ -1308,17 +1308,36 @@ static int mk_pad_is_the_wheel(CPU *c)
  * already acquired by this point and a range cannot be set on an acquired
  * device, so it is unacquired around the call and re-acquired after.
  */
-static void mk_axis_range(uint32_t rec)
+/*
+ * Returns 1 when the range is set AND the device is acquired again.
+ *
+ * The re-acquire is the whole difficulty, and it used to be ignored. An
+ * unacquired DirectInput device does not fail loudly: GetDeviceState leaves
+ * the caller's buffer alone and returns, so every axis, the d-pad and every
+ * button freeze at whatever they last held. That looks like "the pad does
+ * nothing" and it looked, for several sessions, like a steering bug.
+ *
+ * It fails because Acquire needs the window to be foreground, and the first
+ * poll happens while the game is still loading. The game never re-acquires,
+ * so one early failure is permanent. Measured, with the range call skipped:
+ * raw X sweeps 0..65535 and the d-pad reports 0/9000/18000/27000; with it,
+ * neither ever changes once.
+ *
+ * So: say whether it took, and let the caller keep asking.
+ */
+static int mk_axis_range(uint32_t rec)
 {
     struct { uint32_t dwSize, dwHeaderSize, dwObj, dwHow; int32_t lMin, lMax; }
         range;
     void **iface = (void **)(uintptr_t)rd32(rec + 0x44Cu);
     void **vt;
-    long hr;
+    long hr, ahr;
+    static int moaned;
     const char *w = getenv("ES3_WHEEL_RANGE");
     int32_t span = w ? (int32_t)strtol(w, NULL, 0) : 1000000000;
 
-    if (!iface || getenv("ES3_NO_WHEEL_RANGE")) return;
+    /* Nothing to retry in either case: no device, or asked not to. */
+    if (!iface || getenv("ES3_NO_WHEEL_RANGE")) return 1;
     vt = (void **)*iface;
 
     range.dwSize = sizeof range;
@@ -1331,12 +1350,29 @@ static void mk_axis_range(uint32_t rec)
     ((long (__stdcall *)(void *))vt[8])(iface);            /* Unacquire */
     hr = ((long (__stdcall *)(void *, const void *, const void *))vt[6])(
              iface, (const void *)4 /* DIPROP_RANGE */, &range);
-    ((long (__stdcall *)(void *))vt[7])(iface);            /* Acquire */
+    ahr = ((long (__stdcall *)(void *))vt[7])(iface);      /* Acquire */
+
+    if (hr < 0 || ahr < 0) {
+        if (!moaned) {
+            moaned = 1;
+            fprintf(stderr,
+                "[in] the +/-%d axis range did not take: SetProperty %08lX, "
+                "Acquire %08lX.\n"
+                "     An unacquired device reports nothing at all - no axes, "
+                "no d-pad, no buttons -\n"
+                "     so this is asked again until it takes "
+                "(ES3_NO_WHEEL_RANGE to stop asking).\n",
+                span, (unsigned long)hr, (unsigned long)ahr);
+            fflush(stderr);
+        }
+        return 0;
+    }
 
     fprintf(stderr, "[in] asked the pad for a +/-%d axis range, which is what "
-                    "the game divides by: %s (hr %08lX)\n",
-            span, hr >= 0 ? "accepted" : "refused", (unsigned long)hr);
+                    "the game divides by: accepted, and re-acquired (hr %08lX)\n",
+            span, (unsigned long)hr);
     fflush(stderr);
+    return 1;
 }
 
 static int mk_input_trace(CPU *c)
@@ -1354,13 +1390,18 @@ static int mk_input_trace(CPU *c)
      * not the trace. Once per device, after the game has enumerated and
      * acquired it - which is exactly when this poll first runs. */
     {
-        static int ranged;
+        static int ranged, wait;
         uint32_t m = rd32(c->esp + 4u);
-        if (!ranged && m) {
+        /* Once a poll is far too often to retry a device round-trip, and the
+         * thing being waited for - the window reaching the foreground - takes
+         * seconds. A second between attempts at 60Hz. */
+        if (!ranged && m && wait-- <= 0) {
             uint32_t b = rd32(m + 4u), cnt = rd32(m + 8u), i;
+            wait = 60;
             if (b && cnt && cnt <= 4u) {
                 ranged = 1;
-                for (i = 0; i < cnt; i++) mk_axis_range(b + i * 0x780u);
+                for (i = 0; i < cnt; i++)
+                    if (!mk_axis_range(b + i * 0x780u)) ranged = 0;
             }
         }
     }
