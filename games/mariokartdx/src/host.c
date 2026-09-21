@@ -507,7 +507,20 @@ static int mk_attract_load(CPU *c)
  * is a mode whose entry at 0x00871A10 begins with 1 - so filing it stops the
  * frame loop's task tick and the game draws nothing.
  *
- * 0x005BEF80 is the steering task and it has the camera's shape exactly:
+ * 0x005BEF80 is NOT the steering task. It was called that here for a long
+ * time and the mistake cost days: every "steering fix" landed on this row,
+ * the icon on screen never changed, and the DirectInput work that was
+ * genuinely needed could not show because the game had already decided no
+ * wheel was fitted and stopped reading one.
+ *
+ * Its three strings settle it - 0x0088ABEC "ＯＫ", 0x0088AC20 "OFF", and
+ * 0x0088AC54 "カード売り切れ中", cards sold out. A row that can report sold
+ * out is the IC CARD VENDOR. The steering row is 0x005BEBD0, it renders
+ * ステアリングチェック at 0x0088A9B0, its fields are +0x4C and +0xADC, and
+ * mk_drive_board_connected answers it.
+ *
+ * Decode the strings before naming a check. This one has the camera's shape
+ * exactly, which is what made the wrong name plausible:
  *
  *     005BEF8F  cmp dword [edi+0x54], 2      ; the check is complete
  *     005BEF94  cmp dword [edi+0xad8], 0     ; and the device is fitted
@@ -1768,6 +1781,47 @@ static int mk_drive_board_connected(CPU *c)
             fprintf(stderr, "[board] the drive board never answered the serial "
                             "port; saying it is connected "
                             "(ES3_NO_DRIVE_BOARD).\n");
+        }
+    }
+
+    /*
+     * And this task's own result, which is the STEERING CHECK row.
+     *
+     * This is the row that draws the crossed-out steering wheel, and it was
+     * being reported for three days while the fix went somewhere else
+     * entirely. 0x005BEBD0 is the task that renders ステアリングチェック and
+     * "ステアリングに手を触れないで下さい"; it decides at 0x005BEBE4:
+     *
+     *     005BEBE4  cmp dword [ebx+0x4c], 2     ; the check is complete
+     *     005BEBE9  cmp dword [ebx+0xadc], 0    ; and the wheel is fitted
+     *     005BEBF7  jle 0x5bec14                ; <= 0 draws OFF, in red
+     *               else                        ; draws OK, in white
+     *
+     * mk_steering_off writes +0x54 and +0xAD8 on 0x005BEF80, and those are a
+     * DIFFERENT row: its three strings are OK, OFF and カード売り切れ中, and
+     * a row that can say "cards sold out" is the card vendor. Holding its
+     * flag did nothing visible because nothing was ever wrong with it.
+     *
+     * The values here are the ones the game's own success path writes at
+     * 0x005BED8F..0x005BEDBF, so this says what passing would have said.
+     * ES3_STEERING_OFF still forces the crossed-out wheel, for comparison.
+     */
+    if (c->ecx && !getenv("ES3_STEERING_ON")) {
+        uint32_t fitted = getenv("ES3_STEERING_OFF") ? 0u : 1u;
+        static int told;
+        wr32(c->ecx + 0x4Cu, 2u);         /* the check is complete */
+        wr32(c->ecx + 0x50u, 1u);         /* and it passed */
+        wr32(c->ecx + 0xADCu, fitted);    /* and a wheel is fitted */
+        wr32(c->ecx + 0x70u, 0u);         /* its timeout counter, as on success */
+        if (sys) {
+            wr8(sys + 0x18Eu, 1);
+            wr8(sys + 0x19Au, 1);
+        }
+        if (!told) {
+            told = 1;
+            fprintf(stderr, "[wheel] the STEERING CHECK row is answered here: "
+                            "complete, passed, wheel %s.\n",
+                    fitted ? "FITTED" : "absent (ES3_STEERING_OFF)");
         }
     }
     return 0;                         /* the game's own task still runs */
