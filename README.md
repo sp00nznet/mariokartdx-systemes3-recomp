@@ -28,6 +28,15 @@ and the coin are a real pad, and the race was won against the game's own AI.*
 the card prompt that stood in for a screenshot for months is now just
 something you skip on the way to picking a character.*
 
+![Mario mid-boost, driving on the triggers with no assist](docs/manual-pedals.png)
+
+*And driving it properly. Note what is **not** on screen: the two shots above
+have "Auto-Accel is on!" in the corner, the game's assist for players who
+cannot reach the pedal. Here there is no badge — the accelerator and brake
+are the pad's triggers. They turned out not to be axes at all but two bits,
+`0x20` and `0x40`, of an action word that read zero for most of the port's
+life. Peak speed on the triggers measures within 3% of the assist's.*
+
 
 ## Why this target
 
