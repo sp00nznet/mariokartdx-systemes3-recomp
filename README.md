@@ -16,11 +16,17 @@ the Namco System ES3 recompilation toolkit, vendored here as a git submodule.
 > The `.gitignore` refuses all of it. Bring a game tree you can already read;
 > the recompiled C is output you generate.
 
-![Mario Kart Arcade GP DX attract mode, recompiled](docs/attract-mode.png)
+![Mario Kart Arcade GP DX, recompiled: the last lap of a race, finishing first](docs/first-place.gif)
 
-*Attract mode, out of the recompiled executable's own swap chain — captured
-with `ES3_SHOT=`, which reads the back buffer before each present. The card
-prompt is part of the attract loop, not an error.*
+*The final lap of a race played on a gamepad, recompiled. Donkey Kong, lap
+2/2, first place — and the finish. Not a demo loop: the steering, the item
+and the coin are a real pad, and the race was won against the game's own AI.*
+
+![First place under the Mario Kart arch](docs/first-place.png)
+
+*The same run, a frame earlier. Attract mode used to be as far as this got;
+the card prompt that stood in for a screenshot for months is now just
+something you skip on the way to picking a character.*
 
 
 ## Why this target
