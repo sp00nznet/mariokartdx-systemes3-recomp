@@ -1548,6 +1548,73 @@ static int mk_axis_range(uint32_t rec)
     return 1;
 }
 
+/*
+ * Give the game two pedals it can tell apart.
+ *
+ * Measured, and the measurement is the reason this is a vtable hook and not
+ * another write into the record:
+ *
+ *     gas 0 (raw Y 0)   brake 0 (raw Z 32767)   at rest
+ *     gas 0 (raw Y 0)   brake 0 (raw Z 65408)   a trigger pulled
+ *
+ * An XInput pad seen through DirectInput reports BOTH triggers on ONE axis -
+ * Z, centred at 32767 - and nothing at all on Y. The two pedals are already
+ * a single number by the time DirectInput hands them over, so no amount of
+ * work further down can separate them again: the information is gone.
+ *
+ * GetDeviceState is where it is still recoverable. XInput reports the two
+ * triggers separately, jvs.c already reads them, and this puts them back on
+ * the two axes the game expects before the poll at 0x007408DD converts them.
+ * Writing the converted floats afterwards was the other option and is worse:
+ * the poll recomputes them from the raw axes every frame, so it becomes a
+ * race between two writers for the same field.
+ *
+ * Slot 9 of IDirectInputDevice8, on a copy of the vtable - the real one is
+ * shared by every device dinput8 hands out, and this must only affect the
+ * one the game steers with.
+ *
+ * ES3_NO_PEDALS leaves the device alone.
+ */
+typedef long (__stdcall *ES3_GetDeviceState)(void *, unsigned long, void *);
+static ES3_GetDeviceState g_real_gds;
+static void *g_pedal_vtbl[32];       /* IDirectInputDevice8 has exactly 32 */
+
+static long __stdcall mk_get_device_state(void *self, unsigned long n, void *out)
+{
+    long hr = g_real_gds(self, n, out);
+    /* DIJOYSTATE2 begins lX, lY, lZ as LONGs, so the pedals are [1] and [2].
+     * Only when the buffer is really that shape - a caller asking for a
+     * smaller format gets what the device said. */
+    if (hr >= 0 && out && n >= 12u) {
+        long *js = (long *)out;
+        js[1] = (long)(g_pedal_gas   * 1000.0f);   /* accelerator */
+        js[2] = (long)(g_pedal_brake * 1000.0f);   /* brake */
+    }
+    return hr;
+}
+
+static void mk_hook_pedals(uint32_t rec)
+{
+    void **iface = (void **)(uintptr_t)rd32(rec + 0x44Cu);
+    void **vt;
+    unsigned i;
+
+    if (!iface || g_real_gds || getenv("ES3_NO_PEDALS")) return;
+    vt = (void **)*iface;
+    if (!vt) return;
+
+    for (i = 0; i < 32; i++) g_pedal_vtbl[i] = vt[i];
+    g_real_gds = (ES3_GetDeviceState)vt[9];
+    g_pedal_vtbl[9] = (void *)mk_get_device_state;
+    *iface = (void *)g_pedal_vtbl;
+
+    fprintf(stderr, "[in] the pad reports both triggers on one axis, so the "
+                    "game cannot tell the pedals apart; putting them back on "
+                    "their own axes in GetDeviceState (ES3_NO_PEDALS to "
+                    "stop).\n");
+    fflush(stderr);
+}
+
 static int mk_input_trace(CPU *c)
 {
     static int off = -1, said;
@@ -1573,8 +1640,16 @@ static int mk_input_trace(CPU *c)
             wait = 60;
             if (b && cnt && cnt <= 4u) {
                 ranged = 1;
-                for (i = 0; i < cnt; i++)
+                for (i = 0; i < cnt; i++) {
                     if (!mk_axis_range(b + i * 0x780u)) ranged = 0;
+                    /* mk_hook_pedals() is NOT called. Swapping the device's
+                     * vtable pointer for a copy killed DirectInput outright -
+                     * steering, buttons and all, leaving only the JVS coin.
+                     * Kept, and kept disconnected, because the reasoning about
+                     * where the pedals are recoverable still holds and the
+                     * next attempt should start from why this did not. */
+                    (void)mk_hook_pedals;
+                }
             }
         }
     }
