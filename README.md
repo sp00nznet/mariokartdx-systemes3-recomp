@@ -88,6 +88,10 @@ imports    495 functions from 27 DLLs
 wrong turns: [docs/bringup.md](docs/bringup.md). It is long because the
 interesting part of a recomp is never the CPU.
 
+**Where it goes next** — a host window with save states, editable controls,
+video modes, four-cabinet multiplayer and a debug menu over the operator
+settings: [docs/roadmap.md](docs/roadmap.md).
+
 ## Reproducing it
 
 ```powershell
