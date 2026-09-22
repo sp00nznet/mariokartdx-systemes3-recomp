@@ -961,6 +961,46 @@ static int mk_steer_consumer(CPU *c)
     static int on = -1, said;
     uint32_t mgr, count, rec, state, mode, wheel;
 
+    /*
+     * Steer from the wheel this runtime has, not from the board it has not.
+     *
+     * 0x0063D000 reads the DirectInput wheel into its result and then, at
+     * 0x0063D0D6, throws it away again if a byte is set:
+     *
+     *     0063D0D6  cmp byte [[0x00959B38]+0x20], 0
+     *     0063D0DA  je  0x63d0fa          ; clear -> keep the wheel value
+     *     0063D0DC  mov eax, [ebx+0x10]   ; set   -> recompute from the
+     *     0063D0DF  fild [eax+0x70]       ;          cabinet's own counter
+     *     0063D0F7  fstp [ebp-4]          ;          and overwrite it
+     *
+     * That byte is clear in the menus and SET once a race starts, which is
+     * why the wheel steers nothing in game while reading a perfect -1..+1,
+     * and why measuring it in attract mode said everything was fine. The
+     * counter it switches to is [[0x00959B54]+0x10]+0x70, which on a desk
+     * never moves - measured at 57346 in the menu and 57346 mid-race.
+     *
+     * A pre-hook runs before the compare, so clearing it here keeps the
+     * whole function on the path that is already correct.
+     *
+     * ES3_WHEEL_FROM_BOARD leaves the game to the counter, which is what a
+     * real cabinet with a drive board wants.
+     */
+    if (!getenv("ES3_WHEEL_FROM_BOARD")) {
+        uint32_t sy = rd32(0x00959B38u);
+        if (sy && rd8(sy + 0x20u) != 0) {
+            static int said;
+            wr8(sy + 0x20u, 0);
+            if (!said) {
+                said = 1;
+                fprintf(stderr, "[steer] the game switched to the cabinet's "
+                                "own wheel counter, which never moves here; "
+                                "keeping it on the pad "
+                                "(ES3_WHEEL_FROM_BOARD to allow it).\n");
+                fflush(stderr);
+            }
+        }
+    }
+
     if (on < 0) on = getenv("ES3_TRACE_STEER") == NULL;
     if (on) return 0;
 
@@ -989,7 +1029,47 @@ static int mk_steer_consumer(CPU *c)
                 if (w != last) {
                     float f; memcpy(&f, &w, 4);
                     last = w;
-                    fprintf(stderr, "[steer] consumer sees %.4f\n", f);
+                    /* And which of the two sources it will actually use.
+                     *
+                     * 0x0063D0D6 tests byte [[0x00959B38]+0x20]. Zero keeps
+                     * the DirectInput wheel this prints; non-zero throws it
+                     * away and recomputes from a raw integer pair at
+                     * [[0x00959B54]+0x10]+0x70 and +0x40 - the cabinet's own
+                     * wheel, off the board. A perfect -1..+1 here steers
+                     * nothing at all when that byte is set, which is exactly
+                     * the symptom. */
+                    {
+                        uint32_t sy = rd32(0x00959B38u);
+                        uint32_t sg = rd32(0x00959B54u);
+                        uint32_t rec = sg ? rd32(sg + 0x10u) : 0u;
+                        /* And the gate at the very top of this function:
+                         *
+                         *   0063D006  cmp dword [eax+4], 0   ; eax = this
+                         *   0063D00A  fldz                   ; result = 0.0
+                         *   0063D016  je 0x63d0cd            ; and stays 0.0
+                         *
+                         * A zero there means the wheel is never read at all
+                         * and the caller is handed 0.0, however good the
+                         * value in the record is. That is indistinguishable
+                         * from "steering does not work" and is the last
+                         * thing between this value and the kart. */
+                        {
+                            /* The last gate between this value and the kart.
+                             * The caller at 0063CEDA tests [[this+4]+0x44]
+                             * and skips the delivery call when it is zero,
+                             * so a perfect value here still steers nothing.
+                             * Both are printed because the pair is the
+                             * answer: a good value and a zero gate is a
+                             * different bug from a zero value. */
+                            uint32_t t4 = c->eax ? rd32(c->eax + 4u) : 0u;
+                            fprintf(stderr,
+                                "[steer] consumer sees %.4f | this+4=%08X "
+                                "deliver-gate=%08X source=%u raw=%d\n",
+                                f, t4, t4 ? rd32(t4 + 0x44u) : 0u,
+                                sy ? rd8(sy + 0x20u) : 0,
+                                rec ? (int)rd32(rec + 0x70u) : 0);
+                        }
+                    }
                     fflush(stderr);
                 }
             }
@@ -1772,76 +1852,6 @@ static int mk_trace_check(CPU *c)
  *
  * ES3_NO_DRIVE_BOARD leaves it to the serial port.
  */
-/*
- * The row that actually draws the crossed-out steering wheel, on its own
- * object.
- *
- * Measured, which is the only reason this is the right place. The cabinet
- * settings were never wrong - all four bytes read 01 - and three of the four
- * fields derived from them read 1 as well:
- *
- *     [wheel] bytes 19..1C = 01 01 01 01; row fields AD4..AE0 = 1 1 1 0
- *
- * Only +0xAE0 is zero, and only on the object this row reads. Writing it
- * through 0x005BEBD0's `this` put it on a different instance and changed
- * nothing on screen, which is how three earlier attempts failed.
- *
- *     005BEA90  cmp dword [edi+0x48], 2     ; the check is complete
- *     005BEA95  cmp dword [edi+0xae0], 0    ; and the device is fitted
- *     005BEAA3  jle 0x5beabe                ; <= 0 draws OFF, in red
- *
- * Only the fitted field. +0x48 is the state this task advances through and
- * writing it is what parked the boot at the system menu twice - that
- * distinction, between saying what is fitted and saying where the check has
- * got to, is the whole lesson of this bug.
- */
-static int mk_wheel_row_fitted(CPU *c)
-{
-    static int said;
-    uint32_t obj = rd32(0x0095A850u);
-
-    (void)c;
-    if (getenv("ES3_STEERING_ON") || getenv("ES3_STEERING_OFF")) return 0;
-    if (!obj) return 0;
-
-    /*
-     * The gate the whole row turns on.
-     *
-     * The trajectory through one frame said it plainly: the field is 1 at
-     * every checklist row except y=286, where it reads 0 - so the row's own
-     * task clears it, and it clears it because the device never answered:
-     *
-     *     005BEB3C  mov ecx, [0x959b4c]     ; the device
-     *     005BEB42  cmp byte [ecx+4], 0     ; did it answer
-     *     005BEB46  je  0x5beb93            ; no -> skip the success block,
-     *                                       ;       fall through to a timeout
-     *     005BEB4D  mov [edi+0x48], 2       ; yes -> the check is complete
-     *
-     * So answer for it, which is what this runtime does for every other
-     * device that is not on a desk. Then the success block runs, the state
-     * reaches 2, and the row reads the fitted field below rather than
-     * clearing it.
-     */
-    {
-        uint32_t dev = rd32(0x00959B4Cu);
-        if (dev && rd8(dev + 4u) == 0) wr8(dev + 4u, 1);
-    }
-
-    if (rd32(obj + 0xAE0u) != 1u) {
-        wr32(obj + 0xAE0u, 1u);
-        if (!said) {
-            said = 1;
-            fprintf(stderr,
-                "[wheel] the drive board reported no firmware version, so the "
-                "boot's check against \"0.01\" failed and the row drew OFF - "
-                "the crossed-out wheel. Saying it matched, on %08X "
-                "(ES3_STEERING_OFF to leave it absent).\n", obj);
-            fflush(stderr);
-        }
-    }
-    return 0;                         /* the game's own task still runs */
-}
-
 static int mk_drive_board_connected(CPU *c)
 {
     static int off = -1, said;
@@ -1849,12 +1859,6 @@ static int mk_drive_board_connected(CPU *c)
 
     if (off < 0) off = getenv("ES3_NO_DRIVE_BOARD") != NULL;
     if (off) return 0;
-
-    /* From here, because es3_bind_guest(0x005BEA80) never fires - that
-     * row is only ever reached through a pointer this runtime does not
-     * see. This hook ticks every frame and the field is on a global, so
-     * where it is written from does not matter. */
-    mk_wheel_row_fitted(c);
     sys = rd32(0x00959B38u);
     board = sys ? rd32(sys + 0x180u) : 0;
     if (board && rd8(board + 0x49u) == 0) {
@@ -1866,99 +1870,9 @@ static int mk_drive_board_connected(CPU *c)
                             "(ES3_NO_DRIVE_BOARD).\n");
         }
     }
-
-    /*
-     * And this task's own result, which is the STEERING CHECK row.
-     *
-     * This is the row that draws the crossed-out steering wheel, and it was
-     * being reported for three days while the fix went somewhere else
-     * entirely. 0x005BEBD0 is the task that renders ステアリングチェック and
-     * "ステアリングに手を触れないで下さい"; it decides at 0x005BEBE4:
-     *
-     *     005BEBE4  cmp dword [ebx+0x4c], 2     ; the check is complete
-     *     005BEBE9  cmp dword [ebx+0xadc], 0    ; and the wheel is fitted
-     *     005BEBF7  jle 0x5bec14                ; <= 0 draws OFF, in red
-     *               else                        ; draws OK, in white
-     *
-     * mk_steering_off writes +0x54 and +0xAD8 on 0x005BEF80, and those are a
-     * DIFFERENT row: its three strings are OK, OFF and カード売り切れ中, and
-     * a row that can say "cards sold out" is the card vendor. Holding its
-     * flag did nothing visible because nothing was ever wrong with it.
-     *
-     * The values here are the ones the game's own success path writes at
-     * 0x005BED8F..0x005BEDBF, so this says what passing would have said.
-     * ES3_STEERING_OFF still forces the crossed-out wheel, for comparison.
-     */
-    /*
-     * Say a wheel is FITTED, and say it where the cabinet says it.
-     *
-     * Two wrong versions of this came first and both are worth recording.
-     * Forcing the row's own state - +0x4C to 2, +0x50 to 1, +0x70 to 0 - put
-     * the boot at the system menu and left it there, every frame or once:
-     * +0x4C is the state this task advances THROUGH and +0x70 the counter it
-     * advances on, so writing them is not answering the check, it is
-     * preventing it.
-     *
-     * The field the render actually reads is not detected at all. At
-     * 0x005BE09D the game loads it out of the operator settings:
-     *
-     *     005BE09A  mov edx, [eax+0x34]          ; eax = [[0x959B38]+0x188]
-     *     005BE09D  movzx edx, byte [edx+0x1b]   ; "is a wheel fitted"
-     *     005BE0A1  mov [esi+0xadc], edx
-     *
-     * - one byte of cabinet configuration, beside the card vendor's at +0x1A
-     * and two others. So set the setting. The game derives +0xADC from it the
-     * way it always would, nothing else is touched, and no state machine is
-     * held still. +0xADC is written too because that derivation has already
-     * happened by the time this task runs.
-     */
-    if (c->ecx && !getenv("ES3_STEERING_ON")) {
-        uint32_t fitted = getenv("ES3_STEERING_OFF") ? 0u : 1u;
-        uint32_t cfg = sys ? rd32(sys + 0x188u) : 0u;
-        uint32_t set = cfg ? rd32(cfg + 0x34u) : 0u;
-        static int told;
-        /*
-         * Both of them, because the row that draws OFF is the one at y=286
-         * and it reads +0x1C, not the one at y=312 that reads +0x1B. The
-         * checklist trace is what settled that - it prints the colour each
-         * row asks for, and 0x3F is the OFF push against 0x3B for OK:
-         *
-         *     [check] y=286  colour=63  OFF.      <- 0x3F
-         *     [check] y=312  colour=59  ...       <- 0x3B, already OK
-         *
-         * Three functions render this family, and each has its own state
-         * field, its own "fitted" field and its own settings byte:
-         *
-         *     0x005BEA80  y=286  +0x48  +0xAE0  setting +0x1C
-         *     0x005BEBD0  y=312  +0x4C  +0xADC  setting +0x1B
-         *     0x005BEF80  y=364  +0x54  +0xAD8  setting +0x1A  (card vendor)
-         */
-        if (!told) {
-            told = 1;
-            fprintf(stderr,
-                "[wheel] settings %08X via cfg %08X; bytes 19..1C = "
-                "%02X %02X %02X %02X; row fields AD4..AE0 = %u %u %u %u\n",
-                set, cfg,
-                set ? rd8(set + 0x19u) : 0, set ? rd8(set + 0x1Au) : 0,
-                set ? rd8(set + 0x1Bu) : 0, set ? rd8(set + 0x1Cu) : 0,
-                rd32(c->ecx + 0xAD4u), rd32(c->ecx + 0xAD8u),
-                rd32(c->ecx + 0xADCu), rd32(c->ecx + 0xAE0u));
-            fflush(stderr);
-        }
-        /* The setting for the next derivation, and the derived fields for
-         * this one - the rows read those, and the derivation at 0x005BE09D
-         * ran long before this task first ticks. Neither is a state field:
-         * they say what is fitted, not where the check has got to, which is
-         * the distinction the earlier attempts got wrong. */
-        if (set) {
-            wr8(set + 0x1Bu, (uint8_t)fitted);
-            wr8(set + 0x1Cu, (uint8_t)fitted);
-        }
-        wr32(c->ecx + 0xADCu, fitted);
-        wr32(c->ecx + 0xAE0u, fitted);
-    }
     return 0;                         /* the game's own task still runs */
 }
+
 
 /*
  * The cabinet's security dongle, which a desktop has no slot for.
