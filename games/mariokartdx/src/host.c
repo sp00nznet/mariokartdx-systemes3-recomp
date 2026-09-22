@@ -1001,6 +1001,41 @@ static int mk_steer_consumer(CPU *c)
         }
     }
 
+    /*
+     * The two floats the kart's input struct is actually filled from.
+     *
+     * 0x0063C8E0 - the same function that applies the steering - copies
+     * [[0x00959B54]+0x10]+0xAC and +0xB0 into [this+4]+0 and +4 every frame:
+     *
+     *     0063C904  mov eax, [edi+0x10]        ; edi = [0x00959B54]
+     *     0063C907  fld dword [eax+0xb0]
+     *     0063C918  fstp dword [ecx]           ; -> the kart's input struct
+     *     0063C91D  fld dword [eax+0xac]
+     *     0063C929  fstp dword [edx+4]
+     *
+     * So these two are what the throttle and brake are, whatever fills them.
+     * Printed on change: if they move with the triggers then the pedals are
+     * arriving and something further on ignores them, and if they stay at
+     * zero the producer is what to find. The DirectInput record's +0x630 has
+     * no consumer at all outside the input module, which is why this is the
+     * more promising pair.
+     */
+    {
+        static uint32_t la = 0xFFFFFFFFu, lb = 0xFFFFFFFFu;
+        uint32_t sg = rd32(0x00959B54u);
+        uint32_t io = sg ? rd32(sg + 0x10u) : 0u;
+        if (io) {
+            uint32_t a = rd32(io + 0xACu), b = rd32(io + 0xB0u);
+            if (a != la || b != lb) {
+                float fa, fb; memcpy(&fa, &a, 4); memcpy(&fb, &b, 4);
+                la = a; lb = b;
+                fprintf(stderr, "[in] kart pedals: +0xAC=%.4f +0xB0=%.4f\n",
+                        fa, fb);
+                fflush(stderr);
+            }
+        }
+    }
+
     if (on < 0) on = getenv("ES3_TRACE_STEER") == NULL;
     if (on) return 0;
 
