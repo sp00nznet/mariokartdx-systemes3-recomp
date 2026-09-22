@@ -1587,8 +1587,34 @@ static long __stdcall mk_get_device_state(void *self, unsigned long n, void *out
      * smaller format gets what the device said. */
     if (hr >= 0 && out && n >= 12u) {
         long *js = (long *)out;
-        js[1] = (long)(g_pedal_gas   * 1000.0f);   /* accelerator */
-        js[2] = (long)(g_pedal_brake * 1000.0f);   /* brake */
+        /* Full scale, not a guess at one. 1000 got the raw axis moving and
+         * the float the game derives from it stayed 0, which says the value
+         * is being measured against calibration bounds rather than used. A
+         * cabinet's pedal is a 16-bit JVS analog channel, so that is the
+         * range the bounds will have been written for.
+         * ES3_PEDAL_SCALE overrides it while this is still being fitted. */
+        static long span = 0;
+        if (!span) {
+            const char *e = getenv("ES3_PEDAL_SCALE");
+            span = e ? strtol(e, NULL, 0) : 65535;
+        }
+        js[1] = (long)(g_pedal_gas   * (float)span);   /* accelerator */
+        js[2] = (long)(g_pedal_brake * (float)span);   /* brake */
+
+        /* What we were handed and what we wrote, whenever either moves.
+         * The pad is known good - both triggers reach 255 in XInput - and
+         * the brake half of this works, so the gas half failing between two
+         * adjacent lines is worth seeing rather than reasoning about. */
+        {
+            static float lg = -1.0f, lb = -1.0f;
+            if (g_pedal_gas != lg || g_pedal_brake != lb) {
+                lg = g_pedal_gas; lb = g_pedal_brake;
+                fprintf(stderr, "[in] pedals in: gas=%.3f brake=%.3f -> "
+                                "lY=%ld lZ=%ld (n=%lu)\n",
+                        g_pedal_gas, g_pedal_brake, js[1], js[2], n);
+                fflush(stderr);
+            }
+        }
     }
     return hr;
 }
@@ -1602,11 +1628,32 @@ static void mk_hook_pedals(uint32_t rec)
     if (!iface || g_real_gds || getenv("ES3_NO_PEDALS")) return;
     vt = (void **)*iface;
     if (!vt) return;
+    (void)i;
 
-    for (i = 0; i < 32; i++) g_pedal_vtbl[i] = vt[i];
-    g_real_gds = (ES3_GetDeviceState)vt[9];
-    g_pedal_vtbl[9] = (void *)mk_get_device_state;
-    *iface = (void *)g_pedal_vtbl;
+    /*
+     * The one slot, in place - NOT a copy of the table with the pointer
+     * swapped to it. That was tried and it killed the device outright: no
+     * steering, no buttons, only the JVS coin still arriving. dinput8
+     * evidently identifies its objects through that pointer, so replacing it
+     * makes the device something it no longer recognises.
+     *
+     * Writing the slot leaves the object's identity alone. The table is in
+     * dinput8's read-only data, hence VirtualProtect; and it is shared by
+     * every device the DLL hands out, so the wrapper has to be harmless to
+     * the ones this is not aimed at - which it is, because it only rewrites
+     * two axes of a DIJOYSTATE2-sized buffer.
+     */
+    {
+        DWORD old = 0;
+        if (!VirtualProtect(&vt[9], sizeof vt[9], PAGE_READWRITE, &old)) {
+            fprintf(stderr, "[in] could not make the DirectInput vtable "
+                            "writable; pedals stay as the pad reports them\n");
+            return;
+        }
+        g_real_gds = (ES3_GetDeviceState)vt[9];
+        vt[9] = (void *)mk_get_device_state;
+        VirtualProtect(&vt[9], sizeof vt[9], old, &old);
+    }
 
     fprintf(stderr, "[in] the pad reports both triggers on one axis, so the "
                     "game cannot tell the pedals apart; putting them back on "
@@ -1642,13 +1689,7 @@ static int mk_input_trace(CPU *c)
                 ranged = 1;
                 for (i = 0; i < cnt; i++) {
                     if (!mk_axis_range(b + i * 0x780u)) ranged = 0;
-                    /* mk_hook_pedals() is NOT called. Swapping the device's
-                     * vtable pointer for a copy killed DirectInput outright -
-                     * steering, buttons and all, leaving only the JVS coin.
-                     * Kept, and kept disconnected, because the reasoning about
-                     * where the pedals are recoverable still holds and the
-                     * next attempt should start from why this did not. */
-                    (void)mk_hook_pedals;
+                    mk_hook_pedals(b + i * 0x780u);
                 }
             }
         }
@@ -1782,6 +1823,32 @@ static int mk_input_trace(CPU *c)
                      * it became - because guessing a range is what has cost
                      * this the most time. */
                     {
+                        /* The per-axis calibration block, once.
+                         *
+                         * 0x00740240 zeroes four runs of eight floats from
+                         * +0x5AC in steps of 0x20 - one run per axis - and
+                         * 0x00740A67 then normalises each axis as
+                         * (value - a) / b out of them. Zeroed bounds would
+                         * turn any pedal reading into 0 however large it is,
+                         * which is exactly what a full-scale 65535 doing
+                         * nothing looks like. Printed rather than assumed. */
+                        {
+                            static int cal;
+                            if (!cal) {
+                                int ax, j;
+                                cal = 1;
+                                for (ax = 0; ax < 3; ax++) {
+                                    char line[160]; int n = 0;
+                                    for (j = 0; j < 8; j++) {
+                                        uint32_t w = rd32(rec + 0x5ACu + ax * 0x20u + j * 4u);
+                                        float fv; memcpy(&fv, &w, 4);
+                                        n += sprintf(line + n, "%.1f ", fv);
+                                    }
+                                    fprintf(stderr, "[in] axis %d calib: %s\n", ax, line);
+                                }
+                                fflush(stderr);
+                            }
+                        }
                         uint32_t g = rd32(rec + 0x630u), b = rd32(rec + 0x634u);
                         float gf, bf;
                         memcpy(&gf, &g, 4); memcpy(&bf, &b, 4);
