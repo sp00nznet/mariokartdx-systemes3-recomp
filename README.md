@@ -82,7 +82,8 @@ imports    495 functions from 27 DLLs
 | Boots | **Yes, all the way through.** The JVS-injection entry stub, the CRT, every C++ static initialiser, a twenty-thread worker pool, a real `mkart3` window, Direct3D 10 and a DXGI swap chain, DirectInput 8 — and then the cabinet's own startup: drive unit, I/O board, NAMCAM, steering, IC card reader, local network, ALL.Net authentication. **No error filed in any of the five slots** |
 | Renders | **Yes**, 1360x768 — the course, the karts, the characters, the HUD |
 | Plays | **Yes, on a gamepad.** Coin in, pick a character, pick a track, steer, use items, finish a race and win it. The steering outlasted the renderer by weeks: the wheel value was correct the whole time while the game quietly threw it away in favour of a cabinet counter nothing here drives |
-| Not finished | The pedals — the triggers now reach the game at full travel, but nothing consumes them yet and the kart runs on auto-accel. Four theories measured dead, written up in [docs/pedals.md](docs/pedals.md). The in-race camera sometimes hangs when it presents the player — intermittently, not every race, and the race carries on behind it when it does |
+| Pedals | **Yes.** Accelerator and brake on the triggers, peak speed within 3% of the game's own assist. They are not axes: two bits, `0x20` and `0x40`, of an action word that read zero for most of this port's life — see [docs/pedals.md](docs/pedals.md) for that and the four theories measured dead on the way |
+| Not finished | **21–23 fps** against a 60 fps cabinet — the biggest gap between "it plays" and "it plays properly", and it is the lifted CPU rather than the graphics. The in-race camera sometimes hangs when it presents the player — intermittently, not every race, and the race carries on behind it when it does |
 
 **How it got here** — the bring-up, in the order it happened, including the
 wrong turns: [docs/bringup.md](docs/bringup.md). It is long because the
