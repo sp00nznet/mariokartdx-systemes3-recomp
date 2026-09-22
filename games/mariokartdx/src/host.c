@@ -1699,8 +1699,24 @@ static int mk_input_trace(CPU *c)
                 if (nrm != last_norm[k]) {
                     float f; memcpy(&f, &nrm, 4);
                     last_norm[k] = nrm;
-                    fprintf(stderr, "[in] dev%u wheel %.4f (raw X %d)\n",
-                            k, f, (int)rd32(rec + 0x47Cu));
+                    /* And the pedals, which are the same story one field
+                     * along: 0x007408DD and 0x007408EB convert the raw Y and
+                     * Z straight to float with no scaling, and the game then
+                     * compares them against calibration bounds rather than a
+                     * constant. So print both halves - the raw count and what
+                     * it became - because guessing a range is what has cost
+                     * this the most time. */
+                    {
+                        uint32_t g = rd32(rec + 0x630u), b = rd32(rec + 0x634u);
+                        float gf, bf;
+                        memcpy(&gf, &g, 4); memcpy(&bf, &b, 4);
+                        fprintf(stderr,
+                            "[in] dev%u wheel %.4f (raw X %d) | gas %.0f "
+                            "(raw Y %d) brake %.0f (raw Z %d)\n",
+                            k, f, (int)rd32(rec + 0x47Cu),
+                            gf, (int)rd32(rec + 0x480u),
+                            bf, (int)rd32(rec + 0x484u));
+                    }
                 }
             }
             uint32_t pov = rd32(rec + 0x47Cu + 0x20u);
