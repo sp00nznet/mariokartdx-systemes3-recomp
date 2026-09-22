@@ -956,6 +956,46 @@ static int mk_readable(uint32_t va, uint32_t len)
  * Printed once, with every link, so the answer is read rather than deduced.
  * ES3_TRACE_STEER.
  */
+/* What [[0x00959B38]+0x20] held before the steering read cleared it. */
+static uint8_t g_wheel_src_was;
+
+/*
+ * Give the throttle its unscaled path back.
+ *
+ * The steering and the throttle read the same byte, and they want opposite
+ * answers from it. 0x0063D0D6 uses it to choose between the pad's wheel and
+ * the cabinet counter, and clearing it is what made the steering work. Then
+ * 0x0063CF12 - in the caller, after 0x0063D110 has returned the throttle -
+ * reads it again:
+ *
+ *     0063CF12  cmp byte [edi+0x20], 0
+ *     0063CF16  jne 0x63cf21      ; non-zero: use the pedal as it is
+ *     L_0063CF28                  ; zero:     multiply it down and clamp
+ *
+ * So leaving it clear steers correctly and throttles at a fraction. Measured
+ * as a kart that could not keep up with the AI on Rookie in two races, while
+ * the same two races on the game's own auto-accel had been winnable.
+ *
+ * This hook is on the throttle consumer, which the caller invokes at
+ * 0x0063CEFA - before the test at 0x0063CF12 - so putting the byte back here
+ * lands between the two readers, and each gets the answer it wants.
+ */
+static int mk_throttle_unscaled(CPU *c)
+{
+    /* NOT BOUND. Restoring the byte here stopped the pedals dead - auto-accel
+     * came back on, which is the game saying the accelerator never arrived.
+     *
+     * So the byte is not a throttle SCALE, it is a SOURCE selector, and it
+     * selects for both readers at once: non-zero means take the wheel and the
+     * pedals from the cabinet, which on a desk is a counter nothing drives.
+     * Clearing it is what makes both work, and the 0x0063CF28 path it selects
+     * is the pad path rather than a penalty. Kept as a note so the next
+     * attempt does not repeat it. */
+    (void)c;
+    return 0;
+}
+
+
 static int mk_steer_consumer(CPU *c)
 {
     static int on = -1, said;
@@ -989,6 +1029,12 @@ static int mk_steer_consumer(CPU *c)
         uint32_t sy = rd32(0x00959B38u);
         if (sy && rd8(sy + 0x20u) != 0) {
             static int said;
+            /* Remember it: the THROTTLE reads the same byte a few
+             * instructions later, at 0x0063CF12, and takes a scaled-down
+             * path when it is clear. mk_throttle_unscaled() puts it back
+             * before that test. Clearing it and leaving it clear is what
+             * made the kart feel slow while the steering was correct. */
+            g_wheel_src_was = rd8(sy + 0x20u);
             wr8(sy + 0x20u, 0);
             if (!said) {
                 said = 1;
@@ -1085,6 +1131,24 @@ static int mk_steer_consumer(CPU *c)
                     fflush(stderr);
                 }
             }
+        }
+    }
+
+    /* The multiplier the throttle is scaled by.
+     *
+     * 0063C8F0 loads [[0x00959B0C]+4] into [ebp-0xc] and 0063CF34 multiplies
+     * the pedal by it. A kart at full trigger that barely moves is either a
+     * pedal that is not arriving - ruled out, the bit is set - or this being
+     * small. It is a float in a global, so it can simply be read. */
+    {
+        static int shown;
+        uint32_t t = rd32(0x00959B0Cu);
+        if (!shown && t && getenv("ES3_TRACE_STEER")) {
+            uint32_t w = rd32(t + 4u);
+            float f; memcpy(&f, &w, 4);
+            shown = 1;
+            fprintf(stderr, "[in] throttle multiplier [[0x959B0C]+4] = %.6f\n", f);
+            fflush(stderr);
         }
     }
 
