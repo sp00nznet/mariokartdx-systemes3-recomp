@@ -1503,8 +1503,20 @@ static int mk_axis_range(uint32_t rec)
 
     range.dwSize = sizeof range;
     range.dwHeaderSize = 16;
-    range.dwObj = 0;
-    range.dwHow = 0;                   /* DIPH_DEVICE: every axis at once */
+    /*
+     * The wheel axis only, not the whole device.
+     *
+     * DIPH_DEVICE set this range on every axis, and only the wheel wants it:
+     * 0x00740879 divides X by 1e9, but the pedals at 0x007408DD and
+     * 0x007408EB are a bare `fild` - the raw count straight to float, with
+     * no scaling at all. Given +/-1e9 they arrive as a billion, which is why
+     * the wheel steered and the pedals did nothing.
+     *
+     * lX is at offset 0 in DIJOYSTATE2, so DIPH_BYOFFSET with dwObj 0 is the
+     * wheel and leaves the pedals at the range their device reports.
+     */
+    range.dwObj = 0;                   /* DIJOYSTATE2.lX */
+    range.dwHow = 1;                   /* DIPH_BYOFFSET */
     range.lMin = -span;
     range.lMax = span;
 
