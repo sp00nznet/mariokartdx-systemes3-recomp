@@ -1036,6 +1036,58 @@ static int mk_steer_consumer(CPU *c)
         }
     }
 
+    /*
+     * The accelerator and the brake, which are BITS and not axes.
+     *
+     * Days went into feeding the pedals as DirectInput axes because the wheel
+     * is one. They are not. Their consumers sit either side of the steering's
+     * and test one bit each of the action word:
+     *
+     *     0063D13A  mov ecx, [[0x00959B54]+4 + 0x44]   ; the action word
+     *     0063D13D  and ecx, 0x20                      ; the accelerator
+     *     0063D146  fld1                               ; set -> 1.0, else 0.0
+     *
+     *     0063D1FD  and ecx, 0x40                      ; the brake
+     *
+     * That word has read 00000000 in every trace taken this session, which is
+     * why no pedal value of any scale ever did anything: there was no analog
+     * path to get right. It is also what gates the steering's delivery at
+     * 0063CEDF, so it is the one field the whole control scheme runs through.
+     *
+     * Set here rather than anywhere else because this hook is on 0x0063D000,
+     * called from 0x0063CECC - and the accelerator's consumer is called from
+     * 0x0063CEFA, in the same function, thirteen instructions later. So a
+     * write here is in time for the frame it belongs to.
+     *
+     * A trigger past a third of its travel counts as pressed: a cabinet's
+     * pedal is a switch as far as this word is concerned, and the analog
+     * refinement, if the game wants one, is somewhere else.
+     *
+     * ES3_NO_PEDALS leaves the word alone.
+     */
+    if (!getenv("ES3_NO_PEDALS")) {
+        uint32_t sing = rd32(0x00959B54u);
+        uint32_t mgr  = sing ? rd32(sing + 4u) : 0u;
+        if (mgr) {
+            uint32_t act = rd32(mgr + 0x44u);
+            uint32_t was = act;
+            if (g_pedal_gas   > 0.33f) act |=  0x20u; else act &= ~0x20u;
+            if (g_pedal_brake > 0.33f) act |=  0x40u; else act &= ~0x40u;
+            if (act != was) {
+                static int said;
+                wr32(mgr + 0x44u, act);
+                if (!said) {
+                    said = 1;
+                    fprintf(stderr, "[in] the pedals are bits 0x20 and 0x40 "
+                                    "of the action word, not axes; driving "
+                                    "them from the triggers "
+                                    "(ES3_NO_PEDALS to stop).\n");
+                    fflush(stderr);
+                }
+            }
+        }
+    }
+
     if (on < 0) on = getenv("ES3_TRACE_STEER") == NULL;
     if (on) return 0;
 
